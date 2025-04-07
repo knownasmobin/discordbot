@@ -104,21 +104,26 @@ func main() {
 	// Register the interaction handler
 	discord.AddHandler(interactionCreate)
 
+	// We need to define our intents
+	discord.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates
+
 	// Open a websocket connection to Discord and begin listening
 	err = discord.Open()
 	if err != nil {
 		log.Fatal("Error opening connection: ", err)
 	}
 
-	// Register commands
+	// Register commands with global scope
 	log.Println("Registering commands...")
 	registeredCommands := make([]*discordgo.ApplicationCommand, len(commands))
 	for i, command := range commands {
 		cmd, err := discord.ApplicationCommandCreate(discord.State.User.ID, "", command)
 		if err != nil {
-			log.Panicf("Cannot create '%v' command: %v", command.Name, err)
+			log.Printf("Cannot create '%v' command: %v", command.Name, err)
+			continue
 		}
 		registeredCommands[i] = cmd
+		log.Printf("Registered command: %s", cmd.Name)
 	}
 
 	fmt.Println("Bot is now running. Press Ctrl+C to exit.")
@@ -138,9 +143,11 @@ func main() {
 	// Delete all commands when shutting down
 	log.Println("Removing commands...")
 	for _, cmd := range registeredCommands {
-		err := discord.ApplicationCommandDelete(discord.State.User.ID, "", cmd.ID)
-		if err != nil {
-			log.Panicf("Cannot delete '%v' command: %v", cmd.Name, err)
+		if cmd != nil {
+			err := discord.ApplicationCommandDelete(discord.State.User.ID, "", cmd.ID)
+			if err != nil {
+				log.Printf("Cannot delete '%v' command: %v", cmd.Name, err)
+			}
 		}
 	}
 
@@ -154,82 +161,77 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
+	// Add a defer response to prevent "Unknown Integration" errors
+	initialContent := "Processing your command..."
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: initialContent,
+		},
+	})
+	if err != nil {
+		log.Printf("Error responding to interaction: %v", err)
+		return
+	}
+
 	// Get the voice instance for this guild
 	vi := voiceManager.GetVoiceInstance(i.GuildID)
 
 	switch i.ApplicationCommandData().Name {
 	case "ping":
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "Pong!",
-			},
+		content := "Pong!"
+		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &content,
 		})
 
 	case "join":
 		// Find the user's voice channel
 		vs, err := findUserVoiceState(s, i.GuildID, i.Member.User.ID)
 		if err != nil {
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: "You need to be in a voice channel first!",
-				},
+			content := "You need to be in a voice channel first!"
+			s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
 			})
 			return
 		}
-
-		// Respond to the interaction before joining
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "Joining your voice channel...",
-			},
-		})
 
 		// Join the voice channel
 		err = vi.Join(s, vs.ChannelID)
 		if err != nil {
-			s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: fmt.Sprintf("Error joining voice channel: %v", err),
+			content := fmt.Sprintf("Error joining voice channel: %v", err)
+			s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
 			})
 			return
 		}
 
-		s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Content: "Joined voice channel!",
+		content := "Joined voice channel!"
+		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &content,
 		})
 
 	case "leave":
 		if vi.Connection == nil {
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: "I'm not in a voice channel!",
-				},
+			content := "I'm not in a voice channel!"
+			s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
 			})
 			return
 		}
-
-		// Respond to the interaction
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "Leaving voice channel...",
-			},
-		})
 
 		// Leave the voice channel
 		err := vi.Leave()
 		if err != nil {
-			s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: fmt.Sprintf("Error leaving voice channel: %v", err),
+			content := fmt.Sprintf("Error leaving voice channel: %v", err)
+			s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
 			})
 			return
 		}
 
-		s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Content: "Left voice channel!",
+		content := "Left voice channel!"
+		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &content,
 		})
 
 	case "play":
@@ -242,43 +244,31 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			// Try to join the user's voice channel
 			vs, err := findUserVoiceState(s, i.GuildID, i.Member.User.ID)
 			if err != nil {
-				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionResponseChannelMessageWithSource,
-					Data: &discordgo.InteractionResponseData{
-						Content: "You need to be in a voice channel first!",
-					},
+				content := "You need to be in a voice channel first!"
+				s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+					Content: &content,
 				})
 				return
 			}
-
-			// Respond to the interaction first
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: fmt.Sprintf("Adding to queue: %s\nJoining your voice channel...", url),
-				},
-			})
 
 			// Join the user's voice channel
 			err = vi.Join(s, vs.ChannelID)
 			if err != nil {
-				s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-					Content: fmt.Sprintf("Error joining voice channel: %v", err),
+				content := fmt.Sprintf("Error joining voice channel: %v", err)
+				s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+					Content: &content,
 				})
 				return
 			}
-		} else {
-			// Respond to the interaction
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: fmt.Sprintf("Adding to queue: %s", url),
-				},
-			})
 		}
 
 		// Add the URL to the queue
 		vi.AddToQueue(url)
+
+		content := fmt.Sprintf("Added to queue: %s", url)
+		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &content,
+		})
 
 		// If nothing is playing, start playing
 		if !vi.IsPlaying {
@@ -292,22 +282,17 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			// Show the current queue
 			vi.Mu.Lock()
 			if len(vi.Queue) == 0 {
-				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionResponseChannelMessageWithSource,
-					Data: &discordgo.InteractionResponseData{
-						Content: "The queue is empty",
-					},
+				content := "The queue is empty"
+				s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+					Content: &content,
 				})
 			} else {
 				queueMsg := "Current queue:\n"
 				for idx, url := range vi.Queue {
 					queueMsg += fmt.Sprintf("%d. %s\n", idx+1, url)
 				}
-				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionResponseChannelMessageWithSource,
-					Data: &discordgo.InteractionResponseData{
-						Content: queueMsg,
-					},
+				s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+					Content: &queueMsg,
 				})
 			}
 			vi.Mu.Unlock()
@@ -320,43 +305,31 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				// Try to join the user's voice channel
 				vs, err := findUserVoiceState(s, i.GuildID, i.Member.User.ID)
 				if err != nil {
-					s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-						Type: discordgo.InteractionResponseChannelMessageWithSource,
-						Data: &discordgo.InteractionResponseData{
-							Content: "You need to be in a voice channel first!",
-						},
+					content := "You need to be in a voice channel first!"
+					s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+						Content: &content,
 					})
 					return
 				}
-
-				// Respond to the interaction first
-				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionResponseChannelMessageWithSource,
-					Data: &discordgo.InteractionResponseData{
-						Content: fmt.Sprintf("Adding to queue: %s\nJoining your voice channel...", url),
-					},
-				})
 
 				// Join the user's voice channel
 				err = vi.Join(s, vs.ChannelID)
 				if err != nil {
-					s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-						Content: fmt.Sprintf("Error joining voice channel: %v", err),
+					content := fmt.Sprintf("Error joining voice channel: %v", err)
+					s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+						Content: &content,
 					})
 					return
 				}
-			} else {
-				// Respond to the interaction
-				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionResponseChannelMessageWithSource,
-					Data: &discordgo.InteractionResponseData{
-						Content: fmt.Sprintf("Adding to queue: %s", url),
-					},
-				})
 			}
 
 			// Add the URL to the queue
 			vi.AddToQueue(url)
+
+			content := fmt.Sprintf("Added to queue: %s", url)
+			s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
+			})
 
 			// If nothing is playing, start playing
 			if !vi.IsPlaying {
@@ -374,11 +347,9 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		vi.Mu.Unlock()
 
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("Repeat mode %s", status),
-			},
+		content := fmt.Sprintf("Repeat mode %s", status)
+		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &content,
 		})
 
 	case "autoplay":
@@ -391,11 +362,9 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		vi.Mu.Unlock()
 
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("Autoplay mode %s", status),
-			},
+		content := fmt.Sprintf("Autoplay mode %s", status)
+		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &content,
 		})
 	}
 }
