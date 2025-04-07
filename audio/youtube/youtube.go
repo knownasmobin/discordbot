@@ -3,6 +3,8 @@ package youtube
 import (
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,12 +12,14 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/kkdai/youtube/v2"
+	"golang.org/x/net/proxy"
 )
 
 // Client handles YouTube audio downloads and streaming
 type Client struct {
 	YoutubeClient youtube.Client
 	CacheDir      string
+	httpClient    *http.Client
 }
 
 // NewClient creates a new YouTube client
@@ -26,9 +30,70 @@ func NewClient() *Client {
 		os.Mkdir(cacheDir, 0755)
 	}
 
+	// Create an HTTP client with proxy support
+	httpClient := createProxyEnabledClient()
+
+	// Create a YouTube client with the proxy-enabled HTTP client
+	youtubeClient := youtube.Client{
+		HTTPClient: httpClient,
+	}
+
 	return &Client{
-		YoutubeClient: youtube.Client{},
+		YoutubeClient: youtubeClient,
 		CacheDir:      cacheDir,
+		httpClient:    httpClient,
+	}
+}
+
+// createProxyEnabledClient creates an HTTP client with proxy support
+func createProxyEnabledClient() *http.Client {
+	// Start with the default transport
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+
+	// Check for HTTP or HTTPS proxy
+	httpProxy := os.Getenv("HTTP_PROXY")
+	httpsProxy := os.Getenv("HTTPS_PROXY")
+	socksProxy := os.Getenv("SOCKS_PROXY")
+
+	// Configure HTTP/HTTPS proxy if provided
+	if httpProxy != "" || httpsProxy != "" {
+		proxyURL := httpProxy
+		if httpsProxy != "" {
+			proxyURL = httpsProxy
+		}
+
+		if proxyURL != "" {
+			if parsedURL, err := url.Parse(proxyURL); err == nil {
+				transport.Proxy = http.ProxyURL(parsedURL)
+				fmt.Printf("Using HTTP/HTTPS proxy: %s\n", proxyURL)
+			} else {
+				fmt.Printf("Error parsing proxy URL: %v\n", err)
+			}
+		}
+	}
+
+	// Configure SOCKS proxy if provided
+	if socksProxy != "" {
+		// Parse the SOCKS proxy URL
+		socksURL, err := url.Parse(socksProxy)
+		if err == nil {
+			// Create a dialer that uses the SOCKS proxy
+			dialer, err := proxy.FromURL(socksURL, proxy.Direct)
+			if err == nil {
+				// Override the dial function to use the SOCKS dialer
+				transport.DialContext = dialer.(proxy.ContextDialer).DialContext
+				fmt.Printf("Using SOCKS proxy: %s\n", socksProxy)
+			} else {
+				fmt.Printf("Error creating SOCKS dialer: %v\n", err)
+			}
+		} else {
+			fmt.Printf("Error parsing SOCKS proxy URL: %v\n", err)
+		}
+	}
+
+	// Return HTTP client with the configured transport
+	return &http.Client{
+		Transport: transport,
 	}
 }
 
