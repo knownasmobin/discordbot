@@ -1,6 +1,6 @@
 # Discord Music Bot in Go
 
-A Discord bot that can play music from YouTube and Spotify using FFmpeg.
+A Discord bot that can play music from YouTube and Spotify using FFmpeg with slash commands.
 
 ## Prerequisites
 
@@ -22,6 +22,9 @@ A Discord bot that can play music from YouTube and Spotify using FFmpeg.
    SPOTIFY_ID=your_spotify_client_id_here (optional)
    SPOTIFY_SECRET=your_spotify_client_secret_here (optional)
    ```
+4. Make sure your Discord bot has the following permissions:
+   - `applications.commands` (to register slash commands)
+   - `bot` (with Send Messages, Connect, and Speak permissions)
 
 ## Usage
 
@@ -32,17 +35,20 @@ go run main.go
 
 ## Bot Commands
 
-- `!ping` - Test if the bot is responding
-- `!join` - Make the bot join your voice channel
-- `!leave` - Make the bot leave the voice channel
-- `!play [url]` - Add a YouTube or Spotify URL to the queue and start playing if nothing is already playing
-- `!queue [url]` - Add a YouTube or Spotify URL to the queue
-- `!queue` - Show the current queue
-- `!repeat` - Toggle repeat mode (current song will be added back to the queue after playing)
-- `!autoplay` - Toggle autoplay mode (bot will continue playing similar tracks when the queue is empty)
-  - Supported URL formats:
-    - YouTube: `https://www.youtube.com/watch?v=...` or `https://youtu.be/...`
-    - Spotify: `https://open.spotify.com/track/...`
+The bot uses slash commands for all operations:
+
+- `/ping` - Test if the bot is responding
+- `/join` - Make the bot join your voice channel
+- `/leave` - Make the bot leave the voice channel
+- `/play [url]` - Add a YouTube or Spotify URL to the queue and start playing if nothing is already playing
+- `/queue` - Show the current queue
+- `/queue [url]` - Add a YouTube or Spotify URL to the queue
+- `/repeat` - Toggle repeat mode (current song will be added back to the queue after playing)
+- `/autoplay` - Toggle autoplay mode (bot will continue playing similar tracks when the queue is empty)
+
+Supported URL formats:
+- YouTube: `https://www.youtube.com/watch?v=...` or `https://youtu.be/...`
+- Spotify: `https://open.spotify.com/track/...`
 
 ## Notes
 
