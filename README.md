@@ -8,6 +8,7 @@ A Discord bot that can play music from YouTube and Spotify using FFmpeg with sla
 - [FFmpeg](https://ffmpeg.org/) (must be installed and available in PATH)
 - Discord Bot Token
 - (Optional) Spotify Developer credentials
+- (Optional) Proxy server for YouTube access
 
 ## Installation
 
@@ -21,10 +22,25 @@ A Discord bot that can play music from YouTube and Spotify using FFmpeg with sla
    DISCORD_TOKEN=your_discord_bot_token_here
    SPOTIFY_ID=your_spotify_client_id_here (optional)
    SPOTIFY_SECRET=your_spotify_client_secret_here (optional)
+   
+   # Proxy Configuration (optional)
+   # HTTP_PROXY=http://proxy.example.com:8080
+   # HTTPS_PROXY=https://proxy.example.com:8080
+   # SOCKS_PROXY=socks5://proxy.example.com:1080
    ```
 4. Make sure your Discord bot has the following permissions:
    - `applications.commands` (to register slash commands)
    - `bot` (with Send Messages, Connect, and Speak permissions)
+
+## Proxy Configuration
+
+The bot supports proxying YouTube requests through HTTP, HTTPS, or SOCKS proxies. This can help bypass regional restrictions or network limitations:
+
+- **HTTP Proxy**: Set `HTTP_PROXY=http://proxy.example.com:8080` in your `.env` file
+- **HTTPS Proxy**: Set `HTTPS_PROXY=https://proxy.example.com:8080` in your `.env` file
+- **SOCKS Proxy**: Set `SOCKS_PROXY=socks5://proxy.example.com:1080` in your `.env` file
+
+For proxies requiring authentication, use the format: `http://username:password@proxy.example.com:8080`
 
 ## Usage
 

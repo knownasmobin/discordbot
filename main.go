@@ -456,7 +456,12 @@ func playNextInQueue(s *discordgo.Session, channelID string, vi *audio.VoiceInst
 	}
 
 	if err != nil {
-		s.ChannelMessageSend(channelID, fmt.Sprintf("Error playing: %v", err))
+		// Check for age restriction error
+		if strings.Contains(err.Error(), "login required to confirm your age") {
+			s.ChannelMessageSend(channelID, "⚠️ **Cannot play this video: Age-restricted content**\nThis video requires age verification on YouTube.")
+		} else {
+			s.ChannelMessageSend(channelID, fmt.Sprintf("Error playing: %v", err))
+		}
 	}
 
 	// Edit message to indicate track finished playing
