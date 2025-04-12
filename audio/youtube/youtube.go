@@ -297,13 +297,32 @@ func (c *Client) convertToDiscordFormat(inFile, outFile string) error {
 	return nil
 }
 
-// GetVideoInfo gets information about a YouTube video
-func (c *Client) GetVideoInfo(videoID string) (*youtube.Video, error) {
-	video, err := c.YoutubeClient.GetVideo(videoID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get video info: %v", err)
+// GetVideoInfo gets information about a YouTube video using yt-dlp
+func (c *Client) GetVideoInfo(videoID string) (string, error) {
+	// Use yt-dlp to get video info in JSON format
+	cmd := exec.Command("yt-dlp",
+		"--dump-json",
+		"--no-warnings",
+		"https://www.youtube.com/watch?v="+videoID)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to get video info: %v\nstderr: %s", err, stderr.String())
 	}
-	return video, nil
+
+	// Parse the JSON output
+	var videoInfo struct {
+		Title string `json:"title"`
+	}
+
+	if err := json.Unmarshal(stdout.Bytes(), &videoInfo); err != nil {
+		return "", fmt.Errorf("failed to parse video info: %v", err)
+	}
+
+	return videoInfo.Title, nil
 }
 
 // SearchDeezer searches for a track on Deezer
@@ -341,8 +360,8 @@ func (c *Client) SearchDeezer(query string) (string, error) {
 func (c *Client) DownloadAudio(videoID string) (string, error) {
 	fmt.Printf("Attempting to download video: %s\n", videoID)
 
-	// First try to get video info from YouTube
-	video, err := c.GetVideoInfo(videoID)
+	// First try to get video info from YouTube using yt-dlp
+	title, err := c.GetVideoInfo(videoID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get video info: %v", err)
 	}
@@ -358,8 +377,8 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	fmt.Printf("Temporary files:\n- Input: %s\n- Output: %s\n", tmpFile, cachePath)
 
 	// Search Deezer using video title
-	fmt.Printf("Searching Deezer for: %s\n", video.Title)
-	deezerLink, err := c.SearchDeezer(video.Title)
+	fmt.Printf("Searching Deezer for: %s\n", title)
+	deezerLink, err := c.SearchDeezer(title)
 	if err != nil {
 		return "", fmt.Errorf("failed to find track on Deezer: %v", err)
 	}
