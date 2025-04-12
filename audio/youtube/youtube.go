@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -296,9 +297,55 @@ func (c *Client) convertToDiscordFormat(inFile, outFile string) error {
 	return nil
 }
 
-// DownloadAudio downloads audio from a YouTube video using yt-dlp
+// GetVideoInfo gets information about a YouTube video
+func (c *Client) GetVideoInfo(videoID string) (*youtube.Video, error) {
+	video, err := c.YoutubeClient.GetVideo(videoID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get video info: %v", err)
+	}
+	return video, nil
+}
+
+// SearchDeezer searches for a track on Deezer
+func (c *Client) SearchDeezer(query string) (string, error) {
+	// Deezer API endpoint for search
+	url := fmt.Sprintf("https://api.deezer.com/search?q=%s", url.QueryEscape(query))
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("failed to search Deezer: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Data []struct {
+			ID    int    `json:"id"`
+			Title string `json:"title"`
+			Link  string `json:"link"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode Deezer response: %v", err)
+	}
+
+	if len(result.Data) == 0 {
+		return "", fmt.Errorf("no results found on Deezer")
+	}
+
+	// Return the first result's link
+	return result.Data[0].Link, nil
+}
+
+// DownloadAudio downloads audio from a YouTube video or Deezer
 func (c *Client) DownloadAudio(videoID string) (string, error) {
 	fmt.Printf("Attempting to download video: %s\n", videoID)
+
+	// First try to get video info from YouTube
+	video, err := c.GetVideoInfo(videoID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get video info: %v", err)
+	}
 
 	// Create cache directory if it doesn't exist
 	if err := os.MkdirAll(c.CacheDir, 0755); err != nil {
@@ -310,56 +357,7 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
 	fmt.Printf("Temporary files:\n- Input: %s\n- Output: %s\n", tmpFile, cachePath)
 
-	// Try each proxy in the list
-	var lastError error
-	for i := 0; i < len(c.proxyList); i++ {
-		proxy := c.getNextProxy()
-		if proxy == "" {
-			break
-		}
-
-		// Build yt-dlp command
-		args := []string{
-			"-f", "bestaudio",
-			"-x", "--audio-format", "mp3",
-			"-o", tmpFile,
-			"--proxy", "http://" + proxy,
-			"--verbose",
-		}
-
-		// Add video URL
-		args = append(args, "https://www.youtube.com/watch?v="+videoID)
-		fmt.Printf("Attempt %d/%d: Trying proxy %s\n", i+1, len(c.proxyList), proxy)
-
-		// Execute yt-dlp
-		cmd := exec.Command("yt-dlp", args...)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
-		if err := cmd.Run(); err != nil {
-			lastError = err
-			fmt.Printf("❌ Proxy %s failed:\n", proxy)
-			fmt.Printf("yt-dlp stdout:\n%s\n", stdout.String())
-			fmt.Printf("yt-dlp stderr:\n%s\n", stderr.String())
-			fmt.Printf("yt-dlp error: %v\n", err)
-			continue
-		}
-
-		// Success! Convert to Discord format
-		fmt.Println("✅ Download successful, converting to Discord format...")
-		err := c.convertToDiscordFormat(tmpFile, cachePath)
-		if err != nil {
-			return "", fmt.Errorf("failed to convert audio: %v", err)
-		}
-
-		// Clean up the temporary file
-		os.Remove(tmpFile)
-		return cachePath, nil
-	}
-
-	// If all proxies failed, try without proxy
-	fmt.Println("⚠️ All proxies failed, trying without proxy...")
+	// Try to download from YouTube first
 	args := []string{
 		"-f", "bestaudio",
 		"-x", "--audio-format", "mp3",
@@ -374,12 +372,38 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("all download attempts failed. Last error: %v", lastError)
+		// If YouTube download fails, try Deezer
+		fmt.Println("⚠️ YouTube download failed, trying Deezer...")
+
+		// Search Deezer using video title
+		deezerLink, err := c.SearchDeezer(video.Title)
+		if err != nil {
+			return "", fmt.Errorf("failed to find track on Deezer: %v", err)
+		}
+
+		fmt.Printf("Found track on Deezer: %s\n", deezerLink)
+
+		// Download from Deezer
+		args = []string{
+			"-f", "bestaudio",
+			"-x", "--audio-format", "mp3",
+			"-o", tmpFile,
+			"--verbose",
+			deezerLink,
+		}
+
+		cmd = exec.Command("yt-dlp", args...)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("failed to download from Deezer: %v", err)
+		}
 	}
 
 	// Success! Convert to Discord format
-	fmt.Println("✅ Download successful without proxy, converting to Discord format...")
-	err := c.convertToDiscordFormat(tmpFile, cachePath)
+	fmt.Println("✅ Download successful, converting to Discord format...")
+	err = c.convertToDiscordFormat(tmpFile, cachePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to convert audio: %v", err)
 	}
