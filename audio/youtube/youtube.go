@@ -338,7 +338,9 @@ func (c *Client) SearchDeezer(query string) (string, error) {
 	// Deezer API endpoint for search
 	url := fmt.Sprintf("https://api.deezer.com/search?q=%s", url.QueryEscape(query))
 
-	resp, err := http.Get(url)
+	// Use a regular HTTP client without proxy for Deezer
+	client := &http.Client{}
+	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("failed to search Deezer: %v", err)
 	}
@@ -393,7 +395,7 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 	fmt.Printf("Found track on Deezer: %s\n", deezerLink)
 
-	// Download from Deezer
+	// Download from Deezer using yt-dlp without proxy
 	args := []string{
 		"-f", "bestaudio",
 		"-x", "--audio-format", "mp3",
