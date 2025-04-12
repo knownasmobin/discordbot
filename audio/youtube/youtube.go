@@ -232,7 +232,7 @@ func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
 	}
 
 	// Check and use cookie file
-	cookieFile := os.Getenv("YT_COOKIE_FILE")
+	cookieFile := strings.TrimSpace(os.Getenv("YT_COOKIE_FILE"))
 	if cookieFile != "" {
 		// Check if cookie file exists and is readable
 		if _, err := os.Stat(cookieFile); err != nil {
@@ -242,7 +242,8 @@ func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
 		fmt.Printf("Using cookie file: %s\n", cookieFile)
 		args = append(args, "--cookies", cookieFile)
 	} else {
-		fmt.Println("Warning: No cookie file specified. Age-restricted videos may fail.")
+		fmt.Println("Warning: YT_COOKIE_FILE is empty or not set. Age-restricted videos may fail.")
+		fmt.Println("Please set YT_COOKIE_FILE to the path of your cookies.txt file")
 	}
 
 	// Add video URL
