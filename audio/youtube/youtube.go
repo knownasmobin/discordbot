@@ -318,13 +318,16 @@ func (c *Client) GetVideoInfo(videoID string) (string, error) {
 		}
 
 		lastError = err
-		// If it's an age restriction error, try with the next proxy
+		fmt.Printf("Proxy %s failed: %v\n", proxy, err)
+
+		// If it's an age restriction error or any other error, try with the next proxy
 		if strings.Contains(err.Error(), "login required to confirm your age") {
 			fmt.Printf("Age restriction encountered, trying next proxy...\n")
 			continue
 		}
-		// For other errors, return immediately
-		return "", fmt.Errorf("failed to get video info: %v", err)
+		// For other errors, also try the next proxy
+		fmt.Printf("Error encountered, trying next proxy...\n")
+		continue
 	}
 
 	return "", fmt.Errorf("failed to get video info after trying all proxies: %v", lastError)
