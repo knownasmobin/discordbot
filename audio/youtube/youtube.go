@@ -297,13 +297,37 @@ func (c *Client) convertToDiscordFormat(inFile, outFile string) error {
 	return nil
 }
 
-// GetVideoInfo gets information about a YouTube video using the YouTube API
+// GetVideoInfo gets information about a YouTube video using the YouTube API with proxy support
 func (c *Client) GetVideoInfo(videoID string) (string, error) {
-	video, err := c.YoutubeClient.GetVideo(videoID)
-	if err != nil {
+	var lastError error
+	maxRetries := 3
+
+	for i := 0; i < maxRetries; i++ {
+		// Get next proxy from the list
+		proxy := c.getNextProxy()
+		if proxy != "" {
+			fmt.Printf("Using proxy: %s\n", proxy)
+			// Create a new client with the proxy
+			proxyClient := createProxyEnabledClientWithProxy(proxy)
+			c.YoutubeClient.HTTPClient = proxyClient
+		}
+
+		video, err := c.YoutubeClient.GetVideo(videoID)
+		if err == nil {
+			return video.Title, nil
+		}
+
+		lastError = err
+		// If it's an age restriction error, try with a different proxy
+		if strings.Contains(err.Error(), "login required to confirm your age") {
+			fmt.Printf("Age restriction encountered, trying next proxy...\n")
+			continue
+		}
+		// For other errors, return immediately
 		return "", fmt.Errorf("failed to get video info: %v", err)
 	}
-	return video.Title, nil
+
+	return "", fmt.Errorf("failed to get video info after %d retries: %v", maxRetries, lastError)
 }
 
 // SearchDeezer searches for a track on Deezer
