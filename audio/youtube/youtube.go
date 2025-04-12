@@ -237,12 +237,12 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	return c.downloadWithYtDlp(videoID)
 }
 
-// updateProxyList fetches and updates the list of SOCKS5 proxies
+// updateProxyList fetches and updates the list of HTTP proxies
 func (c *Client) updateProxyList() error {
 	c.proxyMutex.Lock()
 	defer c.proxyMutex.Unlock()
 
-	resp, err := http.Get("https://raw.githubusercontent.com/proxifly/free-proxy-list/refs/heads/main/proxies/protocols/socks5/data.txt")
+	resp, err := http.Get("https://raw.githubusercontent.com/Vann-Dev/proxy-list/refs/heads/main/proxies/http-tested/youtube.txt")
 	if err != nil {
 		fmt.Printf("Error fetching proxy list: %v\n", err)
 		return err
@@ -474,22 +474,15 @@ func createProxyEnabledClientWithProxy(proxyURL string) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 
 	// Parse the proxy URL
-	parsedURL, err := url.Parse(proxyURL)
+	parsedURL, err := url.Parse("http://" + proxyURL) // Add http:// prefix if not present
 	if err != nil {
 		fmt.Printf("Error parsing proxy URL: %v\n", err)
 		return &http.Client{Transport: transport}
 	}
 
-	// Create a SOCKS5 dialer
-	dialer, err := proxy.SOCKS5("tcp", parsedURL.Host, nil, proxy.Direct)
-	if err != nil {
-		fmt.Printf("Error creating SOCKS5 dialer: %v\n", err)
-		return &http.Client{Transport: transport}
-	}
-
-	// Override the dial function to use the SOCKS5 dialer
-	transport.DialContext = dialer.(proxy.ContextDialer).DialContext
-	fmt.Printf("Using proxy: %s\n", proxyURL)
+	// Set the proxy
+	transport.Proxy = http.ProxyURL(parsedURL)
+	fmt.Printf("Using HTTP proxy: %s\n", proxyURL)
 
 	return &http.Client{
 		Transport: transport,
