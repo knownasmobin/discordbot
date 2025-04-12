@@ -146,22 +146,23 @@ func (c *Client) updateProxyList() error {
 	c.proxyMutex.Lock()
 	defer c.proxyMutex.Unlock()
 
+	fmt.Println("🔄 Fetching new proxy list...")
 	resp, err := http.Get("https://raw.githubusercontent.com/Vann-Dev/proxy-list/refs/heads/main/proxies/http-tested/youtube.txt")
 	if err != nil {
-		fmt.Printf("Error fetching proxy list: %v\n", err)
+		fmt.Printf("❌ Error fetching proxy list: %v\n", err)
 		return err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Printf("Error reading proxy list: %v\n", err)
+		fmt.Printf("❌ Error reading proxy list: %v\n", err)
 		return err
 	}
 
 	// Split the content by spaces to get individual proxy URLs
 	rawProxies := strings.Fields(string(body))
-	fmt.Printf("Found %d raw proxies\n", len(rawProxies))
+	fmt.Printf("📥 Found %d raw proxies\n", len(rawProxies))
 
 	// Create a channel to receive working proxies
 	workingProxyChan := make(chan string)
@@ -186,6 +187,7 @@ func (c *Client) updateProxyList() error {
 	go func() {
 		for proxy := range workingProxyChan {
 			workingProxies = append(workingProxies, proxy)
+			fmt.Printf("📝 Added working proxy to list: %s\n", proxy)
 		}
 	}()
 
@@ -197,12 +199,20 @@ func (c *Client) updateProxyList() error {
 	// Update the proxy list
 	c.proxyList = workingProxies
 	c.lastUpdate = time.Now()
-	fmt.Printf("Found %d working proxies\n", len(workingProxies))
+	fmt.Printf("✅ Proxy list updated with %d working proxies\n", len(workingProxies))
+	if len(workingProxies) > 0 {
+		fmt.Println("📋 Working proxies:")
+		for _, proxy := range workingProxies {
+			fmt.Printf("  - %s\n", proxy)
+		}
+	}
 	return nil
 }
 
 // testProxy tests if a proxy can access YouTube
 func (c *Client) testProxy(proxyURL string) bool {
+	fmt.Printf("Testing proxy: %s\n", proxyURL)
+
 	// Create a test client with the proxy
 	client := createProxyEnabledClientWithProxy(proxyURL)
 
@@ -212,12 +222,19 @@ func (c *Client) testProxy(proxyURL string) bool {
 	// Try to access YouTube's API
 	resp, err := client.Get("https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 	if err != nil {
+		fmt.Printf("❌ Proxy %s failed: %v\n", proxyURL, err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	// Check if we got a successful response
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode == http.StatusOK {
+		fmt.Printf("✅ Proxy %s is working!\n", proxyURL)
+		return true
+	}
+
+	fmt.Printf("❌ Proxy %s failed with status code: %d\n", proxyURL, resp.StatusCode)
+	return false
 }
 
 // startProxyUpdater starts a goroutine to update the proxy list every 20 minutes
@@ -253,7 +270,6 @@ func (c *Client) getNextProxy() string {
 
 	return ""
 }
-
 
 // convertToDiscordFormat converts audio to a format that Discord can play
 func (c *Client) convertToDiscordFormat(inFile, outFile string) error {
