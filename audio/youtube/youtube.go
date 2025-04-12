@@ -246,29 +246,19 @@ func (c *Client) startProxyUpdater() {
 	}
 }
 
-// getNextProxy returns the next proxy from the list, testing it first
+// getNextProxy returns the next proxy from the list
 func (c *Client) getNextProxy() string {
 	c.proxyMutex.Lock()
 	defer c.proxyMutex.Unlock()
 
 	if len(c.proxyList) == 0 {
-		// Try to find a working proxy
-		if err := c.updateProxyList(); err != nil {
-			fmt.Printf("Error updating proxy list: %v\n", err)
-			return ""
-		}
+		return ""
 	}
 
-	if len(c.proxyList) > 0 {
-		proxy := c.proxyList[0]
-		if c.testProxy(proxy) {
-			return proxy
-		}
-		// If the proxy stopped working, clear the list
-		c.proxyList = []string{}
-	}
-
-	return ""
+	// Get the first proxy and rotate the list
+	proxy := c.proxyList[0]
+	c.proxyList = append(c.proxyList[1:], proxy)
+	return proxy
 }
 
 // convertToDiscordFormat converts audio to a format that Discord can play
@@ -320,14 +310,9 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
 	fmt.Printf("Temporary files:\n- Input: %s\n- Output: %s\n", tmpFile, cachePath)
 
-	// Try different proxies until one works
+	// Try each proxy in the list
 	var lastError error
-	maxRetries := len(c.proxyList) * 2 // Try each proxy twice
-	if maxRetries == 0 {
-		maxRetries = 1 // If no proxies, try once without proxy
-	}
-
-	for i := 0; i < maxRetries; i++ {
+	for i := 0; i < len(c.proxyList); i++ {
 		proxy := c.getNextProxy()
 		if proxy == "" {
 			break
@@ -344,7 +329,7 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 		// Add video URL
 		args = append(args, "https://www.youtube.com/watch?v="+videoID)
-		fmt.Printf("Attempt %d/%d: Executing yt-dlp with proxy %s\n", i+1, maxRetries, proxy)
+		fmt.Printf("Attempt %d/%d: Trying proxy %s\n", i+1, len(c.proxyList), proxy)
 
 		// Execute yt-dlp
 		cmd := exec.Command("yt-dlp", args...)
@@ -354,19 +339,10 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 		if err := cmd.Run(); err != nil {
 			lastError = err
-			fmt.Printf("❌ Attempt with proxy %s failed:\n", proxy)
+			fmt.Printf("❌ Proxy %s failed:\n", proxy)
 			fmt.Printf("yt-dlp stdout:\n%s\n", stdout.String())
 			fmt.Printf("yt-dlp stderr:\n%s\n", stderr.String())
 			fmt.Printf("yt-dlp error: %v\n", err)
-
-			// If it's an age restriction error, try with a different proxy
-			if strings.Contains(stderr.String(), "login required to confirm your age") {
-				fmt.Println("⚠️ Age restriction detected, trying next proxy...")
-				continue
-			}
-
-			// For other errors, try the next proxy
-			fmt.Println("⚠️ Download failed, trying next proxy...")
 			continue
 		}
 
