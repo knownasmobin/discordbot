@@ -202,13 +202,23 @@ func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
 	tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
 	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
 
-	// Download audio using yt-dlp
-	cmd := exec.Command("yt-dlp",
+	// Build yt-dlp command
+	args := []string{
 		"-f", "bestaudio",
 		"-x", "--audio-format", "mp3",
 		"-o", tmpFile,
-		"https://www.youtube.com/watch?v="+videoID)
+	}
 
+	// Add cookie file if specified in environment
+	if cookieFile := os.Getenv("YT_COOKIE_FILE"); cookieFile != "" {
+		args = append(args, "--cookies", cookieFile)
+	}
+
+	// Add video URL
+	args = append(args, "https://www.youtube.com/watch?v="+videoID)
+
+	// Execute yt-dlp
+	cmd := exec.Command("yt-dlp", args...)
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to download with yt-dlp: %v", err)
 	}
