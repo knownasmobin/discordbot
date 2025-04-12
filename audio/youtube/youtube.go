@@ -1,6 +1,7 @@
 package youtube
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -131,30 +132,40 @@ func (c *Client) GetVideoID(url string) (string, error) {
 
 // DownloadAudio downloads audio from a YouTube video
 func (c *Client) DownloadAudio(videoID string) (string, error) {
+	fmt.Printf("Attempting to download video: %s\n", videoID)
+
 	// First try with YouTube client
+	fmt.Println("Trying with YouTube client...")
 	video, err := c.YoutubeClient.GetVideo(videoID)
 	if err != nil {
-		// If YouTube fails, try with yt-dlp
+		fmt.Printf("YouTube client failed: %v\n", err)
+		fmt.Println("Falling back to yt-dlp...")
 		return c.downloadWithYtDlp(videoID)
 	}
 
 	// Get all available formats
+	fmt.Println("Getting available formats...")
 	formats := video.Formats.WithAudioChannels()
 	if len(formats) == 0 {
+		fmt.Println("No audio formats available")
 		return "", fmt.Errorf("no audio formats available")
 	}
+	fmt.Printf("Found %d audio formats\n", len(formats))
 
 	// Try different formats in order of preference
 	var stream io.ReadCloser
-	for _, format := range formats {
+	for i, format := range formats {
+		fmt.Printf("Trying format %d/%d: %s\n", i+1, len(formats), format.MimeType)
 		stream, _, err = c.YoutubeClient.GetStream(video, &format)
 		if err == nil {
+			fmt.Println("Successfully got stream")
 			break
 		}
+		fmt.Printf("Format failed: %v\n", err)
 	}
 
 	if stream == nil {
-		// If all formats fail, try with yt-dlp
+		fmt.Println("All formats failed, falling back to yt-dlp")
 		return c.downloadWithYtDlp(videoID)
 	}
 	defer stream.Close()
@@ -166,6 +177,7 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 	// Create a temporary file for the downloaded audio
 	tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
+	fmt.Printf("Creating temporary file: %s\n", tmpFile)
 	outFile, err := os.Create(tmpFile)
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %v", err)
@@ -173,19 +185,24 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	defer outFile.Close()
 
 	// Copy the stream to the file
+	fmt.Println("Downloading audio...")
 	_, err = io.Copy(outFile, stream)
 	if err != nil {
 		return "", fmt.Errorf("failed to download audio: %v", err)
 	}
+	fmt.Println("Audio downloaded successfully")
 
 	// Convert to Discord format
 	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
+	fmt.Printf("Converting to Discord format: %s\n", cachePath)
 	err = c.convertToDiscordFormat(tmpFile, cachePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to convert audio: %v", err)
 	}
+	fmt.Println("Conversion successful")
 
 	// Clean up the temporary file
+	fmt.Println("Cleaning up temporary file...")
 	os.Remove(tmpFile)
 
 	return cachePath, nil
@@ -193,50 +210,84 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 // downloadWithYtDlp downloads audio using yt-dlp
 func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
+	fmt.Println("Starting yt-dlp download...")
+
 	// Create cache directory if it doesn't exist
 	if err := os.MkdirAll(c.CacheDir, 0755); err != nil {
+		fmt.Printf("Error creating cache directory: %v\n", err)
 		return "", fmt.Errorf("failed to create cache directory: %v", err)
 	}
 
 	// Create temporary files
 	tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
 	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
+	fmt.Printf("Temporary files:\n- Input: %s\n- Output: %s\n", tmpFile, cachePath)
 
 	// Build yt-dlp command
 	args := []string{
 		"-f", "bestaudio",
 		"-x", "--audio-format", "mp3",
 		"-o", tmpFile,
+		"--verbose", // Add verbose output
 	}
 
 	// Add cookie file if specified in environment
 	if cookieFile := os.Getenv("YT_COOKIE_FILE"); cookieFile != "" {
+		fmt.Printf("Using cookie file: %s\n", cookieFile)
 		args = append(args, "--cookies", cookieFile)
+	} else {
+		fmt.Println("No cookie file specified")
 	}
 
 	// Add video URL
 	args = append(args, "https://www.youtube.com/watch?v="+videoID)
+	fmt.Printf("Executing yt-dlp with args: %v\n", args)
 
-	// Execute yt-dlp
+	// Execute yt-dlp with output capture
 	cmd := exec.Command("yt-dlp", args...)
+
+	// Capture both stdout and stderr
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to download with yt-dlp: %v", err)
+		// Log the full output from yt-dlp
+		fmt.Printf("yt-dlp stdout:\n%s\n", stdout.String())
+		fmt.Printf("yt-dlp stderr:\n%s\n", stderr.String())
+		fmt.Printf("yt-dlp error: %v\n", err)
+		return "", fmt.Errorf("failed to download with yt-dlp: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}
+
+	// Log successful output
+	fmt.Printf("yt-dlp output:\n%s\n", stdout.String())
+	if stderr.Len() > 0 {
+		fmt.Printf("yt-dlp warnings:\n%s\n", stderr.String())
+	}
+	fmt.Println("yt-dlp download successful")
 
 	// Convert to Discord format
+	fmt.Println("Converting to Discord format...")
 	err := c.convertToDiscordFormat(tmpFile, cachePath)
 	if err != nil {
+		fmt.Printf("Error converting audio: %v\n", err)
 		return "", fmt.Errorf("failed to convert audio: %v", err)
 	}
+	fmt.Println("Conversion successful")
 
 	// Clean up the temporary file
-	os.Remove(tmpFile)
+	fmt.Println("Cleaning up temporary file...")
+	if err := os.Remove(tmpFile); err != nil {
+		fmt.Printf("Warning: failed to remove temporary file: %v\n", err)
+	}
 
 	return cachePath, nil
 }
 
 // convertToDiscordFormat converts audio to a format that Discord can play
 func (c *Client) convertToDiscordFormat(inFile, outFile string) error {
+	fmt.Printf("Converting %s to %s\n", inFile, outFile)
+
 	cmd := exec.Command("ffmpeg",
 		"-i", inFile,
 		"-f", "s16le",
@@ -244,7 +295,28 @@ func (c *Client) convertToDiscordFormat(inFile, outFile string) error {
 		"-ac", "2",
 		outFile)
 
-	return cmd.Run()
+	// Capture ffmpeg output
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		fmt.Printf("ffmpeg stdout:\n%s\n", stdout.String())
+		fmt.Printf("ffmpeg stderr:\n%s\n", stderr.String())
+		fmt.Printf("ffmpeg error: %v\n", err)
+		return fmt.Errorf("ffmpeg conversion failed: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	// Log successful output
+	if stdout.Len() > 0 {
+		fmt.Printf("ffmpeg output:\n%s\n", stdout.String())
+	}
+	if stderr.Len() > 0 {
+		fmt.Printf("ffmpeg warnings:\n%s\n", stderr.String())
+	}
+
+	return nil
 }
 
 // Play plays YouTube audio in a Discord voice channel
