@@ -211,6 +211,31 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	return "", fmt.Errorf("all download attempts failed. Last error: %v", lastError)
 }
 
+// testProxy tests if a proxy can access YouTube
+func (c *Client) testProxy(proxyURL string) bool {
+	fmt.Printf("Testing proxy: %s\n", proxyURL)
+
+	// Create a test client with the proxy
+	client := createProxyEnabledClientWithProxy(proxyURL)
+
+	// Try to access YouTube's API
+	resp, err := client.Get("https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+	if err != nil {
+		fmt.Printf("Proxy test failed for %s: %v\n", proxyURL, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Check if we got a successful response
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("Proxy test failed for %s: status code %d\n", proxyURL, resp.StatusCode)
+		return false
+	}
+
+	fmt.Printf("Proxy test successful for %s\n", proxyURL)
+	return true
+}
+
 // updateProxyList fetches and updates the list of HTTP proxies
 func (c *Client) updateProxyList() error {
 	c.proxyMutex.Lock()
@@ -230,10 +255,20 @@ func (c *Client) updateProxyList() error {
 	}
 
 	// Split the content by spaces to get individual proxy URLs
-	proxies := strings.Fields(string(body))
-	c.proxyList = proxies
+	rawProxies := strings.Fields(string(body))
+	fmt.Printf("Found %d raw proxies\n", len(rawProxies))
+
+	// Test each proxy and keep only working ones
+	var workingProxies []string
+	for _, proxy := range rawProxies {
+		if c.testProxy(proxy) {
+			workingProxies = append(workingProxies, proxy)
+		}
+	}
+
+	c.proxyList = workingProxies
 	c.lastUpdate = time.Now()
-	fmt.Printf("Updated proxy list with %d proxies\n", len(proxies))
+	fmt.Printf("Updated proxy list with %d working proxies\n", len(workingProxies))
 	return nil
 }
 
@@ -246,7 +281,7 @@ func (c *Client) startProxyUpdater() {
 	}
 }
 
-// getNextProxy returns the next proxy from the list
+// getNextProxy returns the next proxy from the list, testing it first
 func (c *Client) getNextProxy() string {
 	c.proxyMutex.Lock()
 	defer c.proxyMutex.Unlock()
@@ -254,9 +289,33 @@ func (c *Client) getNextProxy() string {
 	if len(c.proxyList) == 0 {
 		return ""
 	}
-	proxy := c.proxyList[0]
-	c.proxyList = append(c.proxyList[1:], proxy) // Rotate the list
-	return proxy
+
+	// Try up to 3 proxies to find a working one
+	for i := 0; i < min(3, len(c.proxyList)); i++ {
+		proxy := c.proxyList[0]
+		c.proxyList = append(c.proxyList[1:], proxy) // Rotate the list
+
+		if c.testProxy(proxy) {
+			return proxy
+		}
+	}
+
+	// If no working proxy found, try updating the list
+	fmt.Println("No working proxies found, updating proxy list...")
+	if err := c.updateProxyList(); err != nil {
+		fmt.Printf("Error updating proxy list: %v\n", err)
+		return ""
+	}
+
+	// Try one more time with the updated list
+	if len(c.proxyList) > 0 {
+		proxy := c.proxyList[0]
+		if c.testProxy(proxy) {
+			return proxy
+		}
+	}
+
+	return ""
 }
 
 // min returns the minimum of two integers
