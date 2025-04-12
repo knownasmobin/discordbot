@@ -322,7 +322,12 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 	// Try different proxies until one works
 	var lastError error
-	for i := 0; i < len(c.proxyList); i++ {
+	maxRetries := len(c.proxyList) * 2 // Try each proxy twice
+	if maxRetries == 0 {
+		maxRetries = 1 // If no proxies, try once without proxy
+	}
+
+	for i := 0; i < maxRetries; i++ {
 		proxy := c.getNextProxy()
 		if proxy == "" {
 			break
@@ -339,7 +344,7 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 		// Add video URL
 		args = append(args, "https://www.youtube.com/watch?v="+videoID)
-		fmt.Printf("Executing yt-dlp with proxy %s\n", proxy)
+		fmt.Printf("Attempt %d/%d: Executing yt-dlp with proxy %s\n", i+1, maxRetries, proxy)
 
 		// Execute yt-dlp
 		cmd := exec.Command("yt-dlp", args...)
@@ -349,15 +354,24 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 		if err := cmd.Run(); err != nil {
 			lastError = err
-			fmt.Printf("Attempt with proxy %s failed:\n", proxy)
+			fmt.Printf("❌ Attempt with proxy %s failed:\n", proxy)
 			fmt.Printf("yt-dlp stdout:\n%s\n", stdout.String())
 			fmt.Printf("yt-dlp stderr:\n%s\n", stderr.String())
 			fmt.Printf("yt-dlp error: %v\n", err)
+
+			// If it's an age restriction error, try with a different proxy
+			if strings.Contains(stderr.String(), "login required to confirm your age") {
+				fmt.Println("⚠️ Age restriction detected, trying next proxy...")
+				continue
+			}
+
+			// For other errors, try the next proxy
+			fmt.Println("⚠️ Download failed, trying next proxy...")
 			continue
 		}
 
 		// Success! Convert to Discord format
-		fmt.Println("Download successful, converting to Discord format...")
+		fmt.Println("✅ Download successful, converting to Discord format...")
 		err := c.convertToDiscordFormat(tmpFile, cachePath)
 		if err != nil {
 			return "", fmt.Errorf("failed to convert audio: %v", err)
@@ -369,7 +383,7 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	}
 
 	// If all proxies failed, try without proxy
-	fmt.Println("All proxies failed, trying without proxy...")
+	fmt.Println("⚠️ All proxies failed, trying without proxy...")
 	args := []string{
 		"-f", "bestaudio",
 		"-x", "--audio-format", "mp3",
@@ -388,7 +402,7 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	}
 
 	// Success! Convert to Discord format
-	fmt.Println("Download successful without proxy, converting to Discord format...")
+	fmt.Println("✅ Download successful without proxy, converting to Discord format...")
 	err := c.convertToDiscordFormat(tmpFile, cachePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to convert audio: %v", err)
