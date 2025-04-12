@@ -28,6 +28,7 @@ type Client struct {
 	proxyList     []string
 	lastUpdate    time.Time
 	proxyMutex    sync.Mutex
+	currentProxy  int // Track current proxy index
 }
 
 // NewClient creates a new YouTube client
@@ -256,9 +257,9 @@ func (c *Client) getNextProxy() string {
 		return ""
 	}
 
-	// Get the first proxy and rotate the list
-	proxy := c.proxyList[0]
-	c.proxyList = append(c.proxyList[1:], proxy)
+	// Get the current proxy and increment the index
+	proxy := c.proxyList[c.currentProxy]
+	c.currentProxy = (c.currentProxy + 1) % len(c.proxyList)
 	return proxy
 }
 
@@ -300,9 +301,8 @@ func (c *Client) convertToDiscordFormat(inFile, outFile string) error {
 // GetVideoInfo gets information about a YouTube video using the YouTube API with proxy support
 func (c *Client) GetVideoInfo(videoID string) (string, error) {
 	var lastError error
-	maxRetries := 3
-
-	for i := 0; i < maxRetries; i++ {
+	// Try all proxies in the list
+	for i := 0; i < len(c.proxyList); i++ {
 		// Get next proxy from the list
 		proxy := c.getNextProxy()
 		if proxy != "" {
@@ -318,7 +318,7 @@ func (c *Client) GetVideoInfo(videoID string) (string, error) {
 		}
 
 		lastError = err
-		// If it's an age restriction error, try with a different proxy
+		// If it's an age restriction error, try with the next proxy
 		if strings.Contains(err.Error(), "login required to confirm your age") {
 			fmt.Printf("Age restriction encountered, trying next proxy...\n")
 			continue
@@ -327,7 +327,7 @@ func (c *Client) GetVideoInfo(videoID string) (string, error) {
 		return "", fmt.Errorf("failed to get video info: %v", err)
 	}
 
-	return "", fmt.Errorf("failed to get video info after %d retries: %v", maxRetries, lastError)
+	return "", fmt.Errorf("failed to get video info after trying all proxies: %v", lastError)
 }
 
 // SearchDeezer searches for a track on Deezer
