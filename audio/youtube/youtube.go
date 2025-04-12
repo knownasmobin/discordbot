@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/joho/godotenv"
 	"github.com/kkdai/youtube/v2"
 	"golang.org/x/net/proxy"
 )
@@ -231,19 +232,40 @@ func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
 		"--verbose",
 	}
 
-	// Check and use cookie file
-	cookieFile := strings.TrimSpace(os.Getenv("YT_COOKIE_FILE"))
+	// Try to get cookie file path from environment variable or .env
+	var cookieFile string
+	if envCookieFile := strings.TrimSpace(os.Getenv("YT_COOKIE_FILE")); envCookieFile != "" {
+		cookieFile = envCookieFile
+		fmt.Println("Using cookie file from environment variable")
+	} else {
+		// Try to load from .env file
+		if err := godotenv.Load(); err == nil {
+			if envCookieFile := strings.TrimSpace(os.Getenv("YT_COOKIE_FILE")); envCookieFile != "" {
+				cookieFile = envCookieFile
+				fmt.Println("Using cookie file from .env file")
+			}
+		}
+	}
+
 	if cookieFile != "" {
 		// Check if cookie file exists and is readable
-		if _, err := os.Stat(cookieFile); err != nil {
+		if fileInfo, err := os.Stat(cookieFile); err != nil {
 			fmt.Printf("Cookie file error: %v\n", err)
 			return "", fmt.Errorf("cookie file not found or not readable: %v", err)
+		} else {
+			fmt.Printf("Cookie file found: %s (size: %d bytes)\n", cookieFile, fileInfo.Size())
+			// Read first few bytes to verify it's a valid cookie file
+			if content, err := os.ReadFile(cookieFile); err != nil {
+				fmt.Printf("Error reading cookie file: %v\n", err)
+			} else {
+				fmt.Printf("Cookie file content preview: %s\n", string(content[:min(100, len(content))]))
+			}
 		}
 		fmt.Printf("Using cookie file: %s\n", cookieFile)
 		args = append(args, "--cookies", cookieFile)
 	} else {
-		fmt.Println("Warning: YT_COOKIE_FILE is empty or not set. Age-restricted videos may fail.")
-		fmt.Println("Please set YT_COOKIE_FILE to the path of your cookies.txt file")
+		fmt.Println("Warning: No cookie file specified in environment or .env file. Age-restricted videos may fail.")
+		fmt.Println("Please set YT_COOKIE_FILE in your environment or .env file")
 	}
 
 	// Add video URL
@@ -294,6 +316,14 @@ func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
 	}
 
 	return cachePath, nil
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // convertToDiscordFormat converts audio to a format that Discord can play
