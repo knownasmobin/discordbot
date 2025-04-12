@@ -145,78 +145,96 @@ func (c *Client) GetVideoID(url string) (string, error) {
 func (c *Client) DownloadAudio(videoID string) (string, error) {
 	fmt.Printf("Attempting to download video: %s\n", videoID)
 
-	// First try with YouTube client
-	fmt.Println("Trying with YouTube client...")
-	video, err := c.YoutubeClient.GetVideo(videoID)
-	if err != nil {
-		fmt.Printf("YouTube client failed: %v\n", err)
-		fmt.Println("Falling back to yt-dlp...")
-		return c.downloadWithYtDlp(videoID)
+	// Try with YouTube client using different proxies
+	fmt.Println("Trying with YouTube client and proxies...")
+	maxRetries := len(c.proxyList)
+	if maxRetries == 0 {
+		maxRetries = 1 // If no proxies, try once without proxy
 	}
 
-	// Get all available formats
-	fmt.Println("Getting available formats...")
-	formats := video.Formats.WithAudioChannels()
-	if len(formats) == 0 {
-		fmt.Println("No audio formats available")
-		return "", fmt.Errorf("no audio formats available")
-	}
-	fmt.Printf("Found %d audio formats\n", len(formats))
-
-	// Try different formats in order of preference
-	var stream io.ReadCloser
-	for i, format := range formats {
-		fmt.Printf("Trying format %d/%d: %s\n", i+1, len(formats), format.MimeType)
-		stream, _, err = c.YoutubeClient.GetStream(video, &format)
-		if err == nil {
-			fmt.Println("Successfully got stream")
-			break
+	for i := 0; i < maxRetries; i++ {
+		// Get next proxy and update HTTP client
+		if proxy := c.getNextProxy(); proxy != "" {
+			fmt.Printf("Trying proxy: %s\n", proxy)
+			c.httpClient = createProxyEnabledClientWithProxy(proxy)
+			c.YoutubeClient.HTTPClient = c.httpClient
 		}
-		fmt.Printf("Format failed: %v\n", err)
+
+		// Try to get video info
+		video, err := c.YoutubeClient.GetVideo(videoID)
+		if err != nil {
+			fmt.Printf("Attempt %d/%d failed with YouTube client: %v\n", i+1, maxRetries, err)
+			continue
+		}
+
+		// Get all available formats
+		fmt.Println("Getting available formats...")
+		formats := video.Formats.WithAudioChannels()
+		if len(formats) == 0 {
+			fmt.Println("No audio formats available")
+			continue
+		}
+		fmt.Printf("Found %d audio formats\n", len(formats))
+
+		// Try different formats in order of preference
+		var stream io.ReadCloser
+		for j, format := range formats {
+			fmt.Printf("Trying format %d/%d: %s\n", j+1, len(formats), format.MimeType)
+			stream, _, err = c.YoutubeClient.GetStream(video, &format)
+			if err == nil {
+				fmt.Println("Successfully got stream")
+				break
+			}
+			fmt.Printf("Format failed: %v\n", err)
+		}
+
+		if stream == nil {
+			fmt.Println("All formats failed, trying next proxy")
+			continue
+		}
+		defer stream.Close()
+
+		// Create cache directory if it doesn't exist
+		if err := os.MkdirAll(c.CacheDir, 0755); err != nil {
+			return "", fmt.Errorf("failed to create cache directory: %v", err)
+		}
+
+		// Create a temporary file for the downloaded audio
+		tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
+		fmt.Printf("Creating temporary file: %s\n", tmpFile)
+		outFile, err := os.Create(tmpFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to create temp file: %v", err)
+		}
+		defer outFile.Close()
+
+		// Copy the stream to the file
+		fmt.Println("Downloading audio...")
+		_, err = io.Copy(outFile, stream)
+		if err != nil {
+			return "", fmt.Errorf("failed to download audio: %v", err)
+		}
+		fmt.Println("Audio downloaded successfully")
+
+		// Convert to Discord format
+		cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
+		fmt.Printf("Converting to Discord format: %s\n", cachePath)
+		err = c.convertToDiscordFormat(tmpFile, cachePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to convert audio: %v", err)
+		}
+		fmt.Println("Conversion successful")
+
+		// Clean up the temporary file
+		fmt.Println("Cleaning up temporary file...")
+		os.Remove(tmpFile)
+
+		return cachePath, nil
 	}
 
-	if stream == nil {
-		fmt.Println("All formats failed, falling back to yt-dlp")
-		return c.downloadWithYtDlp(videoID)
-	}
-	defer stream.Close()
-
-	// Create cache directory if it doesn't exist
-	if err := os.MkdirAll(c.CacheDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create cache directory: %v", err)
-	}
-
-	// Create a temporary file for the downloaded audio
-	tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
-	fmt.Printf("Creating temporary file: %s\n", tmpFile)
-	outFile, err := os.Create(tmpFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %v", err)
-	}
-	defer outFile.Close()
-
-	// Copy the stream to the file
-	fmt.Println("Downloading audio...")
-	_, err = io.Copy(outFile, stream)
-	if err != nil {
-		return "", fmt.Errorf("failed to download audio: %v", err)
-	}
-	fmt.Println("Audio downloaded successfully")
-
-	// Convert to Discord format
-	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
-	fmt.Printf("Converting to Discord format: %s\n", cachePath)
-	err = c.convertToDiscordFormat(tmpFile, cachePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to convert audio: %v", err)
-	}
-	fmt.Println("Conversion successful")
-
-	// Clean up the temporary file
-	fmt.Println("Cleaning up temporary file...")
-	os.Remove(tmpFile)
-
-	return cachePath, nil
+	// If all YouTube client attempts fail, try with yt-dlp
+	fmt.Println("All YouTube client attempts failed, falling back to yt-dlp...")
+	return c.downloadWithYtDlp(videoID)
 }
 
 // updateProxyList fetches and updates the list of SOCKS5 proxies
@@ -448,4 +466,32 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 	}
 
 	return nil
+}
+
+// createProxyEnabledClientWithProxy creates an HTTP client with a specific proxy
+func createProxyEnabledClientWithProxy(proxyURL string) *http.Client {
+	// Start with the default transport
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+
+	// Parse the proxy URL
+	parsedURL, err := url.Parse(proxyURL)
+	if err != nil {
+		fmt.Printf("Error parsing proxy URL: %v\n", err)
+		return &http.Client{Transport: transport}
+	}
+
+	// Create a SOCKS5 dialer
+	dialer, err := proxy.SOCKS5("tcp", parsedURL.Host, nil, proxy.Direct)
+	if err != nil {
+		fmt.Printf("Error creating SOCKS5 dialer: %v\n", err)
+		return &http.Client{Transport: transport}
+	}
+
+	// Override the dial function to use the SOCKS5 dialer
+	transport.DialContext = dialer.(proxy.ContextDialer).DialContext
+	fmt.Printf("Using proxy: %s\n", proxyURL)
+
+	return &http.Client{
+		Transport: transport,
+	}
 }
