@@ -228,15 +228,21 @@ func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
 		"-f", "bestaudio",
 		"-x", "--audio-format", "mp3",
 		"-o", tmpFile,
-		"--verbose", // Add verbose output
+		"--verbose",
 	}
 
-	// Add cookie file if specified in environment
-	if cookieFile := os.Getenv("YT_COOKIE_FILE"); cookieFile != "" {
+	// Check and use cookie file
+	cookieFile := os.Getenv("YT_COOKIE_FILE")
+	if cookieFile != "" {
+		// Check if cookie file exists and is readable
+		if _, err := os.Stat(cookieFile); err != nil {
+			fmt.Printf("Cookie file error: %v\n", err)
+			return "", fmt.Errorf("cookie file not found or not readable: %v", err)
+		}
 		fmt.Printf("Using cookie file: %s\n", cookieFile)
 		args = append(args, "--cookies", cookieFile)
 	} else {
-		fmt.Println("No cookie file specified")
+		fmt.Println("Warning: No cookie file specified. Age-restricted videos may fail.")
 	}
 
 	// Add video URL
@@ -256,6 +262,11 @@ func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
 		fmt.Printf("yt-dlp stdout:\n%s\n", stdout.String())
 		fmt.Printf("yt-dlp stderr:\n%s\n", stderr.String())
 		fmt.Printf("yt-dlp error: %v\n", err)
+
+		// Check if it's a cookie-related error
+		if strings.Contains(stderr.String(), "Sign in to confirm you're not a bot") {
+			return "", fmt.Errorf("cookie authentication failed. Please check your cookie file: %v", err)
+		}
 		return "", fmt.Errorf("failed to download with yt-dlp: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}
 
