@@ -337,7 +337,7 @@ func (c *Client) SearchDeezer(query string) (string, error) {
 	return result.Data[0].Link, nil
 }
 
-// DownloadAudio downloads audio from a YouTube video or Deezer
+// DownloadAudio downloads audio from Deezer using the YouTube video title
 func (c *Client) DownloadAudio(videoID string) (string, error) {
 	fmt.Printf("Attempting to download video: %s\n", videoID)
 
@@ -357,13 +357,22 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
 	fmt.Printf("Temporary files:\n- Input: %s\n- Output: %s\n", tmpFile, cachePath)
 
-	// Try to download from YouTube first
+	// Search Deezer using video title
+	fmt.Printf("Searching Deezer for: %s\n", video.Title)
+	deezerLink, err := c.SearchDeezer(video.Title)
+	if err != nil {
+		return "", fmt.Errorf("failed to find track on Deezer: %v", err)
+	}
+
+	fmt.Printf("Found track on Deezer: %s\n", deezerLink)
+
+	// Download from Deezer
 	args := []string{
 		"-f", "bestaudio",
 		"-x", "--audio-format", "mp3",
 		"-o", tmpFile,
 		"--verbose",
-		"https://www.youtube.com/watch?v=" + videoID,
+		deezerLink,
 	}
 
 	cmd := exec.Command("yt-dlp", args...)
@@ -372,33 +381,7 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		// If YouTube download fails, try Deezer
-		fmt.Println("⚠️ YouTube download failed, trying Deezer...")
-
-		// Search Deezer using video title
-		deezerLink, err := c.SearchDeezer(video.Title)
-		if err != nil {
-			return "", fmt.Errorf("failed to find track on Deezer: %v", err)
-		}
-
-		fmt.Printf("Found track on Deezer: %s\n", deezerLink)
-
-		// Download from Deezer
-		args = []string{
-			"-f", "bestaudio",
-			"-x", "--audio-format", "mp3",
-			"-o", tmpFile,
-			"--verbose",
-			deezerLink,
-		}
-
-		cmd = exec.Command("yt-dlp", args...)
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("failed to download from Deezer: %v", err)
-		}
+		return "", fmt.Errorf("failed to download from Deezer: %v", err)
 	}
 
 	// Success! Convert to Discord format
