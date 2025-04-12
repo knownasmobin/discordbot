@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/kkdai/youtube/v2"
@@ -54,6 +55,8 @@ func createProxyEnabledClient() *http.Client {
 	httpProxy := os.Getenv("HTTP_PROXY")
 	httpsProxy := os.Getenv("HTTPS_PROXY")
 	socksProxy := os.Getenv("SOCKS_PROXY")
+	proxyUser := os.Getenv("PROXY_USER")
+	proxyPass := os.Getenv("PROXY_PASS")
 
 	// Configure HTTP/HTTPS proxy if provided
 	if httpProxy != "" || httpsProxy != "" {
@@ -63,6 +66,11 @@ func createProxyEnabledClient() *http.Client {
 		}
 
 		if proxyURL != "" {
+			// Add authentication if provided
+			if proxyUser != "" && proxyPass != "" {
+				proxyURL = strings.Replace(proxyURL, "://", fmt.Sprintf("://%s:%s@", proxyUser, proxyPass), 1)
+			}
+
 			if parsedURL, err := url.Parse(proxyURL); err == nil {
 				transport.Proxy = http.ProxyURL(parsedURL)
 				fmt.Printf("Using HTTP/HTTPS proxy: %s\n", proxyURL)
@@ -74,6 +82,11 @@ func createProxyEnabledClient() *http.Client {
 
 	// Configure SOCKS proxy if provided
 	if socksProxy != "" {
+		// Add authentication if provided
+		if proxyUser != "" && proxyPass != "" {
+			socksProxy = strings.Replace(socksProxy, "://", fmt.Sprintf("://%s:%s@", proxyUser, proxyPass), 1)
+		}
+
 		// Parse the SOCKS proxy URL
 		socksURL, err := url.Parse(socksProxy)
 		if err == nil {
@@ -118,30 +131,38 @@ func (c *Client) GetVideoID(url string) (string, error) {
 
 // DownloadAudio downloads audio from a YouTube video
 func (c *Client) DownloadAudio(videoID string) (string, error) {
-	// Check if we have a cached file
-	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
-	if _, err := os.Stat(cachePath); err == nil {
-		return cachePath, nil
-	}
-
-	// Get video info
+	// First try with YouTube client
 	video, err := c.YoutubeClient.GetVideo(videoID)
 	if err != nil {
-		return "", fmt.Errorf("failed to get video info: %v", err)
+		// If YouTube fails, try with yt-dlp
+		return c.downloadWithYtDlp(videoID)
 	}
 
-	// Get audio only format
+	// Get all available formats
 	formats := video.Formats.WithAudioChannels()
 	if len(formats) == 0 {
 		return "", fmt.Errorf("no audio formats available")
 	}
 
-	// Get the audio stream
-	stream, _, err := c.YoutubeClient.GetStream(video, &formats[0])
-	if err != nil {
-		return "", fmt.Errorf("failed to get audio stream: %v", err)
+	// Try different formats in order of preference
+	var stream io.ReadCloser
+	for _, format := range formats {
+		stream, _, err = c.YoutubeClient.GetStream(video, &format)
+		if err == nil {
+			break
+		}
+	}
+
+	if stream == nil {
+		// If all formats fail, try with yt-dlp
+		return c.downloadWithYtDlp(videoID)
 	}
 	defer stream.Close()
+
+	// Create cache directory if it doesn't exist
+	if err := os.MkdirAll(c.CacheDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create cache directory: %v", err)
+	}
 
 	// Create a temporary file for the downloaded audio
 	tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
@@ -157,8 +178,43 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 		return "", fmt.Errorf("failed to download audio: %v", err)
 	}
 
-	// Convert to PCM format using FFmpeg
+	// Convert to Discord format
+	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
 	err = c.convertToDiscordFormat(tmpFile, cachePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to convert audio: %v", err)
+	}
+
+	// Clean up the temporary file
+	os.Remove(tmpFile)
+
+	return cachePath, nil
+}
+
+// downloadWithYtDlp downloads audio using yt-dlp
+func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
+	// Create cache directory if it doesn't exist
+	if err := os.MkdirAll(c.CacheDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create cache directory: %v", err)
+	}
+
+	// Create temporary files
+	tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
+	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
+
+	// Download audio using yt-dlp
+	cmd := exec.Command("yt-dlp",
+		"-f", "bestaudio",
+		"-x", "--audio-format", "mp3",
+		"-o", tmpFile,
+		"https://www.youtube.com/watch?v="+videoID)
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to download with yt-dlp: %v", err)
+	}
+
+	// Convert to Discord format
+	err := c.convertToDiscordFormat(tmpFile, cachePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to convert audio: %v", err)
 	}
@@ -189,10 +245,29 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 		return err
 	}
 
-	// Download audio
-	audioFile, err := c.DownloadAudio(videoID)
-	if err != nil {
+	// Try to download audio with retries
+	var audioFile string
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		audioFile, err = c.DownloadAudio(videoID)
+		if err == nil {
+			break
+		}
+
+		// If it's an age restriction error, try with a different proxy
+		if strings.Contains(err.Error(), "login required to confirm your age") {
+			// Rotate proxy configuration
+			c.httpClient = createProxyEnabledClient()
+			c.YoutubeClient.HTTPClient = c.httpClient
+			continue
+		}
+
+		// For other errors, return immediately
 		return err
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to download audio after %d retries: %v", maxRetries, err)
 	}
 
 	// Start speaking
