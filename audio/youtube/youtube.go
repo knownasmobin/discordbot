@@ -11,9 +11,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/joho/godotenv"
 	"github.com/kkdai/youtube/v2"
 	"golang.org/x/net/proxy"
 )
@@ -23,6 +24,9 @@ type Client struct {
 	YoutubeClient youtube.Client
 	CacheDir      string
 	httpClient    *http.Client
+	proxyList     []string
+	lastUpdate    time.Time
+	proxyMutex    sync.Mutex
 }
 
 // NewClient creates a new YouTube client
@@ -41,11 +45,17 @@ func NewClient() *Client {
 		HTTPClient: httpClient,
 	}
 
-	return &Client{
+	client := &Client{
 		YoutubeClient: youtubeClient,
 		CacheDir:      cacheDir,
 		httpClient:    httpClient,
 	}
+
+	// Initialize proxy list
+	go client.updateProxyList()
+	go client.startProxyUpdater()
+
+	return client
 }
 
 // createProxyEnabledClient creates an HTTP client with proxy support
@@ -209,7 +219,55 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	return cachePath, nil
 }
 
-// downloadWithYtDlp downloads audio using yt-dlp
+// updateProxyList fetches and updates the list of SOCKS5 proxies
+func (c *Client) updateProxyList() error {
+	c.proxyMutex.Lock()
+	defer c.proxyMutex.Unlock()
+
+	resp, err := http.Get("https://raw.githubusercontent.com/proxifly/free-proxy-list/refs/heads/main/proxies/protocols/socks5/data.txt")
+	if err != nil {
+		fmt.Printf("Error fetching proxy list: %v\n", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Error reading proxy list: %v\n", err)
+		return err
+	}
+
+	// Split the content by spaces to get individual proxy URLs
+	proxies := strings.Fields(string(body))
+	c.proxyList = proxies
+	c.lastUpdate = time.Now()
+	fmt.Printf("Updated proxy list with %d proxies\n", len(proxies))
+	return nil
+}
+
+// startProxyUpdater starts a goroutine to update the proxy list every 20 minutes
+func (c *Client) startProxyUpdater() {
+	ticker := time.NewTicker(20 * time.Minute)
+	for range ticker.C {
+		fmt.Println("Updating proxy list...")
+		c.updateProxyList()
+	}
+}
+
+// getNextProxy returns the next proxy from the list
+func (c *Client) getNextProxy() string {
+	c.proxyMutex.Lock()
+	defer c.proxyMutex.Unlock()
+
+	if len(c.proxyList) == 0 {
+		return ""
+	}
+	proxy := c.proxyList[0]
+	c.proxyList = append(c.proxyList[1:], proxy) // Rotate the list
+	return proxy
+}
+
+// downloadWithYtDlp downloads audio using yt-dlp with proxy rotation
 func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
 	fmt.Println("Starting yt-dlp download...")
 
@@ -224,98 +282,67 @@ func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
 	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
 	fmt.Printf("Temporary files:\n- Input: %s\n- Output: %s\n", tmpFile, cachePath)
 
-	// Build yt-dlp command
-	args := []string{
-		"-f", "bestaudio",
-		"-x", "--audio-format", "mp3",
-		"-o", tmpFile,
-		"--verbose",
+	// Try different proxies until one works
+	maxRetries := len(c.proxyList)
+	if maxRetries == 0 {
+		maxRetries = 1 // If no proxies, try once without proxy
 	}
 
-	// Try to get cookie file path from environment variable or .env
-	var cookieFile string
-	if envCookieFile := strings.TrimSpace(os.Getenv("YT_COOKIE_FILE")); envCookieFile != "" {
-		cookieFile = envCookieFile
-		fmt.Println("Using cookie file from environment variable")
-	} else {
-		// Try to load from .env file
-		if err := godotenv.Load(); err == nil {
-			if envCookieFile := strings.TrimSpace(os.Getenv("YT_COOKIE_FILE")); envCookieFile != "" {
-				cookieFile = envCookieFile
-				fmt.Println("Using cookie file from .env file")
-			}
+	var lastError error
+	for i := 0; i < maxRetries; i++ {
+		// Build yt-dlp command
+		args := []string{
+			"-f", "bestaudio",
+			"-x", "--audio-format", "mp3",
+			"-o", tmpFile,
+			"--verbose",
 		}
-	}
 
-	if cookieFile != "" {
-		// Check if cookie file exists and is readable
-		if fileInfo, err := os.Stat(cookieFile); err != nil {
-			fmt.Printf("Cookie file error: %v\n", err)
-			return "", fmt.Errorf("cookie file not found or not readable: %v", err)
-		} else {
-			fmt.Printf("Cookie file found: %s (size: %d bytes)\n", cookieFile, fileInfo.Size())
-			// Read first few bytes to verify it's a valid cookie file
-			if content, err := os.ReadFile(cookieFile); err != nil {
-				fmt.Printf("Error reading cookie file: %v\n", err)
-			} else {
-				fmt.Printf("Cookie file content preview: %s\n", string(content[:min(100, len(content))]))
-			}
+		// Add proxy if available
+		if proxy := c.getNextProxy(); proxy != "" {
+			fmt.Printf("Trying proxy: %s\n", proxy)
+			args = append(args, "--proxy", proxy)
 		}
-		fmt.Printf("Using cookie file: %s\n", cookieFile)
-		args = append(args, "--cookies", cookieFile)
-	} else {
-		fmt.Println("Warning: No cookie file specified in environment or .env file. Age-restricted videos may fail.")
-		fmt.Println("Please set YT_COOKIE_FILE in your environment or .env file")
-	}
 
-	// Add video URL
-	args = append(args, "https://www.youtube.com/watch?v="+videoID)
-	fmt.Printf("Executing yt-dlp with args: %v\n", args)
-
-	// Execute yt-dlp with output capture
-	cmd := exec.Command("yt-dlp", args...)
-
-	// Capture both stdout and stderr
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// Log the full output from yt-dlp
-		fmt.Printf("yt-dlp stdout:\n%s\n", stdout.String())
-		fmt.Printf("yt-dlp stderr:\n%s\n", stderr.String())
-		fmt.Printf("yt-dlp error: %v\n", err)
-
-		// Check if it's a cookie-related error
-		if strings.Contains(stderr.String(), "Sign in to confirm you're not a bot") {
-			return "", fmt.Errorf("cookie authentication failed. Please check your cookie file: %v", err)
+		// Add cookie file if specified
+		if cookieFile := strings.TrimSpace(os.Getenv("YT_COOKIE_FILE")); cookieFile != "" {
+			args = append(args, "--cookies", cookieFile)
 		}
-		return "", fmt.Errorf("failed to download with yt-dlp: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+
+		// Add video URL
+		args = append(args, "https://www.youtube.com/watch?v="+videoID)
+		fmt.Printf("Executing yt-dlp with args: %v\n", args)
+
+		// Execute yt-dlp with output capture
+		cmd := exec.Command("yt-dlp", args...)
+
+		// Capture both stdout and stderr
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			lastError = err
+			fmt.Printf("Attempt %d/%d failed:\n", i+1, maxRetries)
+			fmt.Printf("yt-dlp stdout:\n%s\n", stdout.String())
+			fmt.Printf("yt-dlp stderr:\n%s\n", stderr.String())
+			fmt.Printf("yt-dlp error: %v\n", err)
+			continue
+		}
+
+		// Success! Convert to Discord format
+		fmt.Println("Download successful, converting to Discord format...")
+		err := c.convertToDiscordFormat(tmpFile, cachePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to convert audio: %v", err)
+		}
+
+		// Clean up the temporary file
+		os.Remove(tmpFile)
+		return cachePath, nil
 	}
 
-	// Log successful output
-	fmt.Printf("yt-dlp output:\n%s\n", stdout.String())
-	if stderr.Len() > 0 {
-		fmt.Printf("yt-dlp warnings:\n%s\n", stderr.String())
-	}
-	fmt.Println("yt-dlp download successful")
-
-	// Convert to Discord format
-	fmt.Println("Converting to Discord format...")
-	err := c.convertToDiscordFormat(tmpFile, cachePath)
-	if err != nil {
-		fmt.Printf("Error converting audio: %v\n", err)
-		return "", fmt.Errorf("failed to convert audio: %v", err)
-	}
-	fmt.Println("Conversion successful")
-
-	// Clean up the temporary file
-	fmt.Println("Cleaning up temporary file...")
-	if err := os.Remove(tmpFile); err != nil {
-		fmt.Printf("Warning: failed to remove temporary file: %v\n", err)
-	}
-
-	return cachePath, nil
+	return "", fmt.Errorf("all download attempts failed. Last error: %v", lastError)
 }
 
 // min returns the minimum of two integers
