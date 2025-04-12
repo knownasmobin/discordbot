@@ -141,100 +141,74 @@ func (c *Client) GetVideoID(url string) (string, error) {
 	return "", fmt.Errorf("invalid YouTube URL: %s", url)
 }
 
-// DownloadAudio downloads audio from a YouTube video
+// DownloadAudio downloads audio from a YouTube video using yt-dlp
 func (c *Client) DownloadAudio(videoID string) (string, error) {
 	fmt.Printf("Attempting to download video: %s\n", videoID)
 
-	// Try with YouTube client using different proxies
-	fmt.Println("Trying with YouTube client and proxies...")
+	// Create cache directory if it doesn't exist
+	if err := os.MkdirAll(c.CacheDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create cache directory: %v", err)
+	}
+
+	// Create temporary files
+	tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
+	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
+	fmt.Printf("Temporary files:\n- Input: %s\n- Output: %s\n", tmpFile, cachePath)
+
+	// Try different proxies until one works
 	maxRetries := len(c.proxyList)
 	if maxRetries == 0 {
 		maxRetries = 1 // If no proxies, try once without proxy
 	}
 
+	var lastError error
 	for i := 0; i < maxRetries; i++ {
-		// Get next proxy and update HTTP client
+		// Build yt-dlp command
+		args := []string{
+			"-f", "bestaudio",
+			"-x", "--audio-format", "mp3",
+			"-o", tmpFile,
+			"--verbose",
+		}
+
+		// Add proxy if available
 		if proxy := c.getNextProxy(); proxy != "" {
 			fmt.Printf("Trying proxy: %s\n", proxy)
-			c.httpClient = createProxyEnabledClientWithProxy(proxy)
-			c.YoutubeClient.HTTPClient = c.httpClient
+			args = append(args, "--proxy", "http://"+proxy)
 		}
 
-		// Try to get video info
-		video, err := c.YoutubeClient.GetVideo(videoID)
-		if err != nil {
-			fmt.Printf("Attempt %d/%d failed with YouTube client: %v\n", i+1, maxRetries, err)
+		// Add video URL
+		args = append(args, "https://www.youtube.com/watch?v="+videoID)
+		fmt.Printf("Executing yt-dlp with args: %v\n", args)
+
+		// Execute yt-dlp
+		cmd := exec.Command("yt-dlp", args...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			lastError = err
+			fmt.Printf("Attempt %d/%d failed:\n", i+1, maxRetries)
+			fmt.Printf("yt-dlp stdout:\n%s\n", stdout.String())
+			fmt.Printf("yt-dlp stderr:\n%s\n", stderr.String())
+			fmt.Printf("yt-dlp error: %v\n", err)
 			continue
 		}
 
-		// Get all available formats
-		fmt.Println("Getting available formats...")
-		formats := video.Formats.WithAudioChannels()
-		if len(formats) == 0 {
-			fmt.Println("No audio formats available")
-			continue
-		}
-		fmt.Printf("Found %d audio formats\n", len(formats))
-
-		// Try different formats in order of preference
-		var stream io.ReadCloser
-		for j, format := range formats {
-			fmt.Printf("Trying format %d/%d: %s\n", j+1, len(formats), format.MimeType)
-			stream, _, err = c.YoutubeClient.GetStream(video, &format)
-			if err == nil {
-				fmt.Println("Successfully got stream")
-				break
-			}
-			fmt.Printf("Format failed: %v\n", err)
-		}
-
-		if stream == nil {
-			fmt.Println("All formats failed, trying next proxy")
-			continue
-		}
-		defer stream.Close()
-
-		// Create cache directory if it doesn't exist
-		if err := os.MkdirAll(c.CacheDir, 0755); err != nil {
-			return "", fmt.Errorf("failed to create cache directory: %v", err)
-		}
-
-		// Create a temporary file for the downloaded audio
-		tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
-		fmt.Printf("Creating temporary file: %s\n", tmpFile)
-		outFile, err := os.Create(tmpFile)
-		if err != nil {
-			return "", fmt.Errorf("failed to create temp file: %v", err)
-		}
-		defer outFile.Close()
-
-		// Copy the stream to the file
-		fmt.Println("Downloading audio...")
-		_, err = io.Copy(outFile, stream)
-		if err != nil {
-			return "", fmt.Errorf("failed to download audio: %v", err)
-		}
-		fmt.Println("Audio downloaded successfully")
-
-		// Convert to Discord format
-		cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
-		fmt.Printf("Converting to Discord format: %s\n", cachePath)
-		err = c.convertToDiscordFormat(tmpFile, cachePath)
+		// Success! Convert to Discord format
+		fmt.Println("Download successful, converting to Discord format...")
+		err := c.convertToDiscordFormat(tmpFile, cachePath)
 		if err != nil {
 			return "", fmt.Errorf("failed to convert audio: %v", err)
 		}
-		fmt.Println("Conversion successful")
 
 		// Clean up the temporary file
-		fmt.Println("Cleaning up temporary file...")
 		os.Remove(tmpFile)
-
 		return cachePath, nil
 	}
 
-	// If all YouTube client attempts fail, try with yt-dlp
-	fmt.Println("All YouTube client attempts failed, falling back to yt-dlp...")
-	return c.downloadWithYtDlp(videoID)
+	return "", fmt.Errorf("all download attempts failed. Last error: %v", lastError)
 }
 
 // updateProxyList fetches and updates the list of HTTP proxies
@@ -283,84 +257,6 @@ func (c *Client) getNextProxy() string {
 	proxy := c.proxyList[0]
 	c.proxyList = append(c.proxyList[1:], proxy) // Rotate the list
 	return proxy
-}
-
-// downloadWithYtDlp downloads audio using yt-dlp with proxy rotation
-func (c *Client) downloadWithYtDlp(videoID string) (string, error) {
-	fmt.Println("Starting yt-dlp download...")
-
-	// Create cache directory if it doesn't exist
-	if err := os.MkdirAll(c.CacheDir, 0755); err != nil {
-		fmt.Printf("Error creating cache directory: %v\n", err)
-		return "", fmt.Errorf("failed to create cache directory: %v", err)
-	}
-
-	// Create temporary files
-	tmpFile := filepath.Join(c.CacheDir, videoID+".tmp")
-	cachePath := filepath.Join(c.CacheDir, videoID+".pcm")
-	fmt.Printf("Temporary files:\n- Input: %s\n- Output: %s\n", tmpFile, cachePath)
-
-	// Try different proxies until one works
-	maxRetries := len(c.proxyList)
-	if maxRetries == 0 {
-		maxRetries = 1 // If no proxies, try once without proxy
-	}
-
-	var lastError error
-	for i := 0; i < maxRetries; i++ {
-		// Build yt-dlp command
-		args := []string{
-			"-f", "bestaudio",
-			"-x", "--audio-format", "mp3",
-			"-o", tmpFile,
-			"--verbose",
-		}
-
-		// Add proxy if available
-		if proxy := c.getNextProxy(); proxy != "" {
-			fmt.Printf("Trying proxy: %s\n", proxy)
-			args = append(args, "--proxy", proxy)
-		}
-
-		// Add cookie file if specified
-		if cookieFile := strings.TrimSpace(os.Getenv("YT_COOKIE_FILE")); cookieFile != "" {
-			args = append(args, "--cookies", cookieFile)
-		}
-
-		// Add video URL
-		args = append(args, "https://www.youtube.com/watch?v="+videoID)
-		fmt.Printf("Executing yt-dlp with args: %v\n", args)
-
-		// Execute yt-dlp with output capture
-		cmd := exec.Command("yt-dlp", args...)
-
-		// Capture both stdout and stderr
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
-		if err := cmd.Run(); err != nil {
-			lastError = err
-			fmt.Printf("Attempt %d/%d failed:\n", i+1, maxRetries)
-			fmt.Printf("yt-dlp stdout:\n%s\n", stdout.String())
-			fmt.Printf("yt-dlp stderr:\n%s\n", stderr.String())
-			fmt.Printf("yt-dlp error: %v\n", err)
-			continue
-		}
-
-		// Success! Convert to Discord format
-		fmt.Println("Download successful, converting to Discord format...")
-		err := c.convertToDiscordFormat(tmpFile, cachePath)
-		if err != nil {
-			return "", fmt.Errorf("failed to convert audio: %v", err)
-		}
-
-		// Clean up the temporary file
-		os.Remove(tmpFile)
-		return cachePath, nil
-	}
-
-	return "", fmt.Errorf("all download attempts failed. Last error: %v", lastError)
 }
 
 // min returns the minimum of two integers
