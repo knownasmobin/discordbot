@@ -297,32 +297,13 @@ func (c *Client) convertToDiscordFormat(inFile, outFile string) error {
 	return nil
 }
 
-// GetVideoInfo gets information about a YouTube video using yt-dlp
+// GetVideoInfo gets information about a YouTube video using the YouTube API
 func (c *Client) GetVideoInfo(videoID string) (string, error) {
-	// Use yt-dlp to get video info in JSON format
-	cmd := exec.Command("yt-dlp",
-		"--dump-json",
-		"--no-warnings",
-		"https://www.youtube.com/watch?v="+videoID)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to get video info: %v\nstderr: %s", err, stderr.String())
+	video, err := c.YoutubeClient.GetVideo(videoID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get video info: %v", err)
 	}
-
-	// Parse the JSON output
-	var videoInfo struct {
-		Title string `json:"title"`
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &videoInfo); err != nil {
-		return "", fmt.Errorf("failed to parse video info: %v", err)
-	}
-
-	return videoInfo.Title, nil
+	return video.Title, nil
 }
 
 // SearchDeezer searches for a track on Deezer
@@ -360,7 +341,7 @@ func (c *Client) SearchDeezer(query string) (string, error) {
 func (c *Client) DownloadAudio(videoID string) (string, error) {
 	fmt.Printf("Attempting to download video: %s\n", videoID)
 
-	// First try to get video info from YouTube using yt-dlp
+	// First try to get video info from YouTube
 	title, err := c.GetVideoInfo(videoID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get video info: %v", err)
