@@ -1,12 +1,7 @@
 package youtube
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"regexp"
 	"strings"
 )
 
@@ -22,7 +17,7 @@ type RelatedVideosResult struct {
 	} `json:"items"`
 }
 
-// GetRelatedVideo returns a related video URL based on the current video URL
+// GetRelatedVideo returns a related video URL based on the current video URL using Invidious
 func (c *Client) GetRelatedVideo(videoURL string) (string, error) {
 	// Extract video ID
 	videoID, err := c.GetVideoID(videoURL)
@@ -30,126 +25,60 @@ func (c *Client) GetRelatedVideo(videoURL string) (string, error) {
 		return "", err
 	}
 
-	// If we have an API key, use the YouTube Data API
-	apiKey := "" // Set this from env if available
-	if apiKey != "" {
-		return getRelatedVideoAPI(videoID, apiKey)
-	}
-
-	// Otherwise use a scraping approach
-	return getRelatedVideoScrape(videoID)
-}
-
-// getRelatedVideoAPI gets related videos using the YouTube Data API
-func getRelatedVideoAPI(videoID, apiKey string) (string, error) {
-	apiURL := fmt.Sprintf(
-		"https://www.googleapis.com/youtube/v3/search?part=snippet&relatedToVideoId=%s&type=video&maxResults=1&key=%s",
-		videoID, apiKey,
-	)
-
-	resp, err := http.Get(apiURL)
+	// Get video info from Invidious to find related videos
+	video, err := c.Invidious.GetVideoInfo(videoID)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch related videos: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var result RelatedVideosResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %v", err)
+		return "", fmt.Errorf("failed to get video info from Invidious: %v", err)
 	}
 
-	if len(result.Items) == 0 {
-		return "", fmt.Errorf("no related videos found")
-	}
-
-	relatedVideoID := result.Items[0].ID.VideoID
-	return fmt.Sprintf("https://www.youtube.com/watch?v=%s", relatedVideoID), nil
-}
-
-// getRelatedVideoScrape gets related videos by scraping YouTube
-// This is a fallback method when API key is not available
-func getRelatedVideoScrape(videoID string) (string, error) {
-	// Request the YouTube video page
-	resp, err := http.Get(fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID))
+	// Search for similar videos using the video title
+	results, err := c.SearchVideos(video.Title, 5)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch video page: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %v", err)
+		return "", fmt.Errorf("failed to search for related videos: %v", err)
 	}
 
-	// Extract related video IDs using regex
-	// This is a simplified approach and might break if YouTube changes their HTML structure
-	pattern := regexp.MustCompile(`"videoId":"([^"]+)"`)
-	matches := pattern.FindAllSubmatch(body, -1)
-
-	// Filter out the original video ID and duplicates
-	seenIDs := map[string]bool{videoID: true}
-	var relatedIDs []string
-
-	for _, match := range matches {
-		if len(match) >= 2 {
-			id := string(match[1])
-			if !seenIDs[id] {
-				seenIDs[id] = true
-				relatedIDs = append(relatedIDs, id)
-			}
+	// Find a video that isn't the original one
+	for _, result := range results {
+		if result.VideoID != videoID {
+			// Return the Invidious watch URL
+			return c.Invidious.GetInvidiousWatchURL(result.VideoID), nil
 		}
 	}
 
-	if len(relatedIDs) == 0 {
-		return "", fmt.Errorf("no related videos found")
-	}
-
-	// Return the first related video
-	return fmt.Sprintf("https://www.youtube.com/watch?v=%s", relatedIDs[0]), nil
+	return "", fmt.Errorf("no related videos found")
 }
 
-// GetRelatedSpotifyTrack returns a related track for Spotify URLs by converting to YouTube search
+// GetRelatedSpotifyTrack returns a related track for Spotify URLs by searching through Invidious
 func (c *Client) GetRelatedSpotifyTrack(artistName string, trackName string) (string, error) {
 	// For Spotify tracks, search for other songs by the same artist
-	searchQuery := url.QueryEscape(fmt.Sprintf("%s similar to %s", artistName, trackName))
-	searchURL := fmt.Sprintf("https://www.youtube.com/results?search_query=%s", searchQuery)
+	searchQuery := fmt.Sprintf("%s similar to %s", artistName, trackName)
+	fmt.Printf("Searching for related tracks to '%s' by '%s' using Invidious\n", trackName, artistName)
 
-	// Make a request to the search page
-	resp, err := http.Get(searchURL)
+	// Search using Invidious
+	results, err := c.SearchVideos(searchQuery, 10)
 	if err != nil {
-		return "", fmt.Errorf("failed to search: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %v", err)
+		return "", fmt.Errorf("failed to search for related tracks: %v", err)
 	}
 
-	// Extract video IDs
-	pattern := regexp.MustCompile(`"videoId":"([^"]+)"`)
-	matches := pattern.FindAllSubmatch(body, -1)
-
-	// Filter for music videos
-	var videoIDs []string
-	seenIDs := make(map[string]bool)
-
-	for _, match := range matches {
-		if len(match) >= 2 {
-			id := string(match[1])
-			if !seenIDs[id] && !strings.Contains(id, trackName) { // Avoid the same track
-				seenIDs[id] = true
-				videoIDs = append(videoIDs, id)
-			}
+	// Filter for tracks that don't contain the original track name
+	for _, result := range results {
+		if !strings.Contains(strings.ToLower(result.Title), strings.ToLower(trackName)) {
+			// Return the Invidious watch URL
+			return c.Invidious.GetInvidiousWatchURL(result.VideoID), nil
 		}
 	}
 
-	if len(videoIDs) == 0 {
-		return "", fmt.Errorf("no related tracks found")
+	// If no suitable track found, try searching just for the artist
+	if len(results) == 0 {
+		artistResults, err := c.SearchVideos(artistName, 5)
+		if err != nil {
+			return "", fmt.Errorf("failed to search for artist tracks: %v", err)
+		}
+
+		if len(artistResults) > 0 {
+			return c.Invidious.GetInvidiousWatchURL(artistResults[0].VideoID), nil
+		}
 	}
 
-	// Return the first result
-	return fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoIDs[0]), nil
+	return "", fmt.Errorf("no related tracks found")
 }

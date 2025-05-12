@@ -75,13 +75,39 @@ go run main.go
 - `!volume <1-100>` - Set volume level
 
 ## Troubleshooting
+### Age-restricted Videos and IP Restrictions
+If you encounter issues with age-restricted videos or IP restrictions:
 
-### Age-restricted Videos
-If you encounter issues with age-restricted videos:
+#### Cookie-based Authentication (Recommended)
 1. Make sure you have exported your YouTube cookies correctly
 2. Verify the cookie file path in YT_COOKIE_FILE
 3. Check that the cookie file is in Netscape format
 4. Ensure you're logged into YouTube when exporting cookies
+
+#### Enhanced YouTube Integration
+The bot now uses the [goutubedl](https://github.com/wader/goutubedl) wrapper for improved YouTube video handling:
+- Robust handling of age-restricted content
+- Better error recovery and fallback mechanisms
+- Simplified integration with yt-dlp
+- Automatic proxy support
+
+#### Alternative Methods (Automatic Fallbacks)
+The bot includes several fallback methods that automatically activate when restrictions are encountered:
+1. Enhanced yt-dlp parameters to bypass restrictions
+2. Alternative YouTube frontends (Invidious instances)
+3. Direct YouTube API access with randomized headers
+4. Deezer music service as a last resort
+
+#### Proxy Configuration
+If you continue to experience IP restrictions, you can configure proxies in your .env file:
+```
+# HTTP/HTTPS proxy (standard web proxy)
+HTTP_PROXY=http://proxy.example.com:8080
+HTTPS_PROXY=https://proxy.example.com:8080
+
+# SOCKS proxy (more anonymous)
+SOCKS_PROXY=socks5://proxy.example.com:1080
+```
 
 ### Common Errors
 - "Sign in to confirm you're not a bot" - Check your cookie file setup
@@ -94,4 +120,4 @@ Feel free to submit issues and pull requests.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.
