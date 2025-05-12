@@ -15,6 +15,7 @@ require (
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/kkdai/youtube/v2 v2.10.3 // indirect
+	
 	github.com/zmb3/spotify/v2 v2.4.3 // indirect
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/net v0.38.0 // indirect
@@ -23,4 +24,5 @@ require (
 	golang.org/x/text v0.23.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
+	layeh.com/gopus v0.0.0-20210501142526-1ee02d434e32 // indirect
 )
