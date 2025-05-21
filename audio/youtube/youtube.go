@@ -169,33 +169,22 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 	log.Printf("Successfully downloaded audio to: %s", audioFile)
 	defer os.Remove(audioFile) // Clean up the file after playing
 
-	// Create a new FFmpeg command to convert the audio to Opus
+	// Create a new FFmpeg command to convert the audio to Discord-compatible format
 	ffmpegArgs := []string{
-		"-i", audioFile,
-		"-f", "s16le",
-		"-ar", "48000",
-		"-ac", "2",
-		"-loglevel", "warning",
-		"-acodec", "libopus",
-		"-f", "opus",
-		"-ar", "48000",
-		"-ac", "2",
-		"-b:a", "128k",
-		"-frame_duration", "20",
-		"-application", "audio",
-		"-vbr", "on",
-		"-compression_level", "10",
-		"-packet_loss", "1",
-		"-fec", "on",
-		"-dither_method", "triangular",
-		"-vbr", "on",
-		"-compression_level", "10",
-		"-application", "audio",
-		"-frame_duration", "20",
-		"-packet_loss", "1",
-		"-fec", "on",
-		"-dither_method", "triangular",
-		"pipe:1",
+		"-i", audioFile,           // Input file
+		"-f", "s16le",             // Output format: signed 16-bit little-endian
+		"-ar", "48000",            // Audio sample rate: 48kHz
+		"-ac", "2",                 // Audio channels: stereo
+		"-loglevel", "warning",     // Only show warnings and errors
+		"-acodec", "pcm_s16le",     // Output codec: 16-bit PCM
+		"-af", "bass=g=1,treble=g=1", // Slight audio enhancement
+		"-ss", "0",                 // Start from beginning
+		"-t", "0:10",               // Play first 10 seconds for testing (remove for full playback)
+		"-y",                       // Overwrite output file if it exists
+		"-re",                      // Read input at native frame rate
+		"-threads", "0",            // Use all available CPU threads
+		"-nostdin",                  // Don't expect any user input
+		"pipe:1",                    // Output to stdout
 	}
 
 	log.Printf("Starting FFmpeg with args: %v", ffmpegArgs)

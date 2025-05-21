@@ -2,6 +2,7 @@ package audio
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os/exec"
@@ -60,46 +61,107 @@ func (vi *VoiceInstance) Join(s *discordgo.Session, channelID string) error {
 	vi.Mu.Lock()
 	defer vi.Mu.Unlock()
 
+	log.Printf("Attempting to join voice channel %s in guild %s", channelID, vi.GuildID)
+
 	// If we're already connected to this channel, do nothing
 	if vi.Connection != nil && vi.ChannelID == channelID {
+		log.Printf("Already connected to voice channel %s", channelID)
 		return nil
+	}
+
+	// Initialize StopChan if it's nil
+	if vi.StopChan == nil {
+		vi.StopChan = make(chan bool, 1)
 	}
 
 	// Disconnect from current channel if we're in one
 	if vi.Connection != nil {
-		vi.Connection.Disconnect()
+		log.Printf("Leaving current voice channel %s", vi.ChannelID)
+		// Don't use vi.Leave() here to avoid deadlock
+		if err := vi.Connection.Disconnect(); err != nil {
+			log.Printf("Error disconnecting from current channel: %v", err)
+		}
+		vi.Connection = nil
 	}
 
 	// Connect to the new channel
+	log.Printf("Connecting to voice channel %s", channelID)
 	vc, err := s.ChannelVoiceJoin(vi.GuildID, channelID, false, true)
 	if err != nil {
-		return err
+		log.Printf("Failed to join voice channel: %v", err)
+		return fmt.Errorf("failed to join voice channel: %v", err)
 	}
 
+	// Initialize voice connection properties
 	vi.Connection = vc
 	vi.ChannelID = channelID
-	return nil
+
+	// Wait for voice connection to be ready
+	timeout := time.After(5 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if vc.Ready {
+				log.Printf("Successfully connected to voice channel %s", channelID)
+				return nil
+			}
+		case <-timeout:
+			log.Printf("Timed out waiting for voice connection to be ready")
+			// Clean up the failed connection
+			if err := vc.Disconnect(); err != nil {
+				log.Printf("Error cleaning up failed voice connection: %v", err)
+			}
+			vi.Connection = nil
+			vi.ChannelID = ""
+			return fmt.Errorf("timed out waiting for voice connection to be ready")
+		}
+	}
 }
 
-// Leave disconnects from a voice channel
+// Leave disconnects from a voice channel and cleans up resources
 func (vi *VoiceInstance) Leave() error {
 	vi.Mu.Lock()
 	defer vi.Mu.Unlock()
 
 	if vi.Connection == nil {
-		return errors.New("not connected to a voice channel")
+		return nil // Already disconnected
 	}
+
+	log.Printf("Disconnecting from voice channel %s in guild %s", vi.ChannelID, vi.GuildID)
 
 	// Stop any playing audio
-	vi.StopChan <- true
-
-	err := vi.Connection.Disconnect()
-	if err != nil {
-		return err
+	if vi.StopChan != nil {
+		select {
+		case vi.StopChan <- true:
+			// Successfully sent stop signal
+		default:
+			// Channel is full or closed, no need to block
+		}
 	}
 
+	// Disconnect from voice
+	err := vi.Connection.Disconnect()
+	if err != nil {
+		log.Printf("Error disconnecting from voice: %v", err)
+	}
+
+	// Clean up resources
 	vi.Connection = nil
 	vi.ChannelID = ""
+	vi.IsPlaying = false
+	vi.CurrentURL = ""
+	vi.Queue = nil
+
+	// Reset stop channel
+	if vi.StopChan != nil {
+		close(vi.StopChan)
+		vi.StopChan = make(chan bool, 1)
+	}
+
+	log.Printf("Successfully left voice channel in guild %s", vi.GuildID)
 	return nil
 }
 

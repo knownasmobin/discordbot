@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"discordbot/audio"
 	"discordbot/audio/spotify"
@@ -92,7 +94,17 @@ func init() {
 	}
 }
 
+// Global context for cancellation
+var (
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+)
+
 func main() {
+	// Create a context that will be canceled on interrupt
+	ctx, cancelFunc = context.WithCancel(context.Background())
+	defer cancelFunc()
+
 	// Create a new Discord session using the token from .env
 	token := os.Getenv("DISCORD_TOKEN")
 	if token == "" {
@@ -103,6 +115,10 @@ func main() {
 	if err != nil {
 		log.Fatal("Error creating Discord session: ", err)
 	}
+
+	// Store the Discord session in a way that's accessible to cleanup
+	discord.StateEnabled = true
+	discord.LogLevel = discordgo.LogDebug
 
 	// Register the interaction handler
 	discord.AddHandler(interactionCreate)
@@ -129,28 +145,26 @@ func main() {
 		log.Printf("Registered command: %s", cmd.Name)
 	}
 
-	fmt.Println("Bot is now running. Press Ctrl+C to exit.")
+	// Set up signal handling
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 
-	// Set up a channel to listen for interrupt signals
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-
-	// Set up a channel to wait for the interrupt signal
-	done := make(chan struct{})
-
-	// Start a goroutine to handle cleanup when receiving an interrupt signal
+	// Start a goroutine to handle shutdown
 	go func() {
-		// Wait for the interrupt signal
-		sig := <-interrupt
-		log.Printf("Received signal: %v. Shutting down gracefully...\n", sig)
+		// Wait for a signal or context cancellation
+		select {
+		case sig := <-signalChan:
+			log.Printf("Received signal: %v. Shutting down gracefully...\n", sig)
+		case <-ctx.Done():
+			log.Println("Shutting down due to context cancellation...")
+		}
 
 		// Clean up voice connections
 		log.Println("Disconnecting from voice channels...")
 		for guildID, instance := range voiceManager.Instances {
-			if instance.Connection != nil {
+			if instance != nil && instance.Connection != nil {
 				log.Printf("Leaving voice channel in guild %s", guildID)
-				err := instance.Leave()
-				if err != nil {
+				if err := instance.Leave(); err != nil {
 					log.Printf("Error leaving voice channel in guild %s: %v", guildID, err)
 				}
 			}
@@ -161,8 +175,7 @@ func main() {
 		for i, cmd := range registeredCommands {
 			if cmd != nil {
 				log.Printf("Deleting command: %s", cmd.Name)
-				err := discord.ApplicationCommandDelete(discord.State.User.ID, "", cmd.ID)
-				if err != nil {
+				if err := discord.ApplicationCommandDelete(discord.State.User.ID, "", cmd.ID); err != nil {
 					log.Printf("Cannot delete '%v' command: %v", cmd.Name, err)
 				} else {
 					registeredCommands[i] = nil // Mark as deleted
@@ -172,18 +185,18 @@ func main() {
 
 		// Close the Discord session
 		log.Println("Closing Discord session...")
-		err := discord.Close()
-		if err != nil {
+		if err := discord.Close(); err != nil {
 			log.Printf("Error closing Discord session: %v", err)
 		}
 
-		close(done) // Signal that cleanup is complete
+		// Exit the application
+		os.Exit(0)
 	}()
 
-	// Wait for the interrupt signal and cleanup to complete
 	log.Println("Bot is now running. Press Ctrl+C to exit.")
-	<-done
-	log.Println("Bot has shut down gracefully.")
+
+	// Block until context is done
+	<-ctx.Done()
 }
 
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -291,26 +304,35 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		url := options[0].StringValue()
 
 		// Check if we're in a voice channel
-		if vi.Connection == nil {
-			// Try to join the user's voice channel
-			vs, err := findUserVoiceState(s, i.GuildID, i.Member.User.ID)
-			if err != nil {
-				content := "You need to be in a voice channel first!"
-				s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-					Content: &content,
-				})
-				return
-			}
+		vs, err := findUserVoiceState(s, i.GuildID, i.Member.User.ID)
+		if err != nil {
+			content := "You need to be in a voice channel first!"
+			s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
+			})
+			return
+		}
 
-			// Join the user's voice channel
-			err = vi.Join(s, vs.ChannelID)
-			if err != nil {
-				content := fmt.Sprintf("Error joining voice channel: %v", err)
-				s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-					Content: &content,
-				})
-				return
-			}
+		// Join or move to the user's voice channel
+		err = vi.Join(s, vs.ChannelID)
+		if err != nil {
+			content := fmt.Sprintf("Error joining voice channel: %v", err)
+			s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
+			})
+			return
+		}
+
+		// Small delay to ensure voice connection is ready
+		time.Sleep(500 * time.Millisecond)
+
+		// Ensure we're connected to voice
+		if vi.Connection == nil || vi.Connection.Ready != true {
+			content := "Failed to connect to voice channel. Please try again."
+			s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
+			})
+			return
 		}
 
 		log.Printf("Adding URL to queue: %s", url)
