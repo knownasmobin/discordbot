@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -269,12 +270,20 @@ func (vi *VoiceInstance) PlayAudio(filePath string) error {
 			"-ar", "48000",           // Audio sample rate (48kHz)
 			"-ac", "2",               // Audio channels (stereo)
 			"-loglevel", "warning",    // Only show warnings and errors
-			"-af", "volume=0.5",        // Adjust volume if needed
+			"-af", "volume=0.5,aresample=async=1000", // Adjust volume and resample
 			"-acodec", "pcm_s16le",    // Force PCM signed 16-bit little-endian codec
 			"-ar", "48000",            // Force 48kHz sample rate
 			"-ac", "2",                // Force stereo
 			"-f", "s16le",             // Force output format
+			"-fflags", "nobuffer",     // Reduce input buffering
+			"-flags", "low_delay",     // Reduce latency
+			"-probesize", "32",        // Reduce probe size
+			"-analyzeduration", "0",   // Don't analyze the entire file
 			"pipe:1")                  // Output to stdout
+
+		// Create a buffer for reading audio data (60ms of stereo audio at 48kHz = 11520 bytes)
+		// Using a larger buffer to reduce the number of reads
+		buffer := make([]byte, 11520)
 
 		// Get the command's stdout pipe
 		stdout, err := cmd.StdoutPipe()
@@ -282,6 +291,9 @@ func (vi *VoiceInstance) PlayAudio(filePath string) error {
 			log.Printf("Error creating stdout pipe: %v", err)
 			return
 		}
+
+		// Set process group ID to allow killing child processes
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 		// Start the command
 		err = cmd.Start()
@@ -293,46 +305,44 @@ func (vi *VoiceInstance) PlayAudio(filePath string) error {
 		// Make sure to clean up the ffmpeg process
 		defer func() {
 			if cmd.Process != nil {
-				cmd.Process.Kill()
+				// Kill the entire process group
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			}
 		}()
 
-		// Buffer for reading audio data (20ms of stereo audio at 48kHz = 3840 bytes)
-		buffer := make([]byte, 3840)
-
-
-		// Create a ticker for consistent timing (20ms = 50fps)
-		ticker := time.NewTicker(20 * time.Millisecond)
+		// Create a ticker for consistent timing (60ms = ~16.67fps)
+		ticker := time.NewTicker(60 * time.Millisecond)
 		defer ticker.Stop()
 
 		for {
-			// Read raw PCM data
-			_, err := io.ReadFull(stdout, buffer)
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				break
-			} else if err != nil {
-				log.Printf("Error reading audio data: %v", err)
-				break
-			}
-
-			// Send the raw PCM data to Discord
 			select {
-			case vi.Connection.OpusSend <- buffer:
-				// Data sent successfully
 			case <-ticker.C:
-				// Skip frame if we can't keep up
-				log.Println("Warning: Dropping audio frame - buffer full")
+				// Read raw PCM data with timeout
+				n, err := stdout.Read(buffer)
+				if err == io.EOF {
+					// End of file, we're done
+					return
+				} else if err != nil {
+					log.Printf("Error reading audio data: %v", err)
+					return
+				}
+
+				// Only send if we have data
+				if n > 0 {
+					// Copy the buffer to ensure we don't modify it while it's being sent
+					frame := make([]byte, n)
+					copy(frame, buffer[:n])
+
+					// Send the frame with a timeout
+					select {
+					case vi.Connection.OpusSend <- frame:
+						// Frame sent successfully
+					case <-time.After(100 * time.Millisecond):
+						// Skip frame if we can't send it in time
+						log.Println("Warning: Frame send timeout, dropping frame")
+					}
+				}
 			}
-
-			// Wait for next tick to maintain consistent timing
-			<-ticker.C
-		}
-
-		// Send silence to ensure the audio finishes playing
-		silence := make([]byte, 3840)
-		for i := 0; i < 5; i++ { // 100ms of silence
-			vi.Connection.OpusSend <- silence
-			time.Sleep(20 * time.Millisecond)
 		}
 	}()
 
