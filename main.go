@@ -155,8 +155,18 @@ func main() {
 	// Create a context that will be canceled on interrupt
 	ctx, cancelFunc = context.WithCancel(context.Background())
 	defer func() {
+		log.Println("Shutting down...")
 		cancelFunc()
+		
+		// Clean up voice connections
+		if voiceManager != nil {
+			log.Println("Cleaning up voice connections...")
+			voiceManager.Cleanup()
+		}
+		
+		// Clean up any remaining processes
 		cleanupChildProcesses()
+		log.Println("Shutdown complete")
 	}()
 
 	// Create a new Discord session using the token from .env

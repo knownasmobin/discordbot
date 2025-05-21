@@ -39,6 +39,37 @@ func NewVoiceManager() *VoiceManager {
 	}
 }
 
+// Cleanup cleans up all voice connections with a timeout
+func (vm *VoiceManager) Cleanup() {
+	vm.Mu.Lock()
+	defer vm.Mu.Unlock()
+
+	// Create a channel to track cleanup completion
+	done := make(chan struct{})
+	
+	// Start cleanup in a goroutine
+	go func() {
+		defer close(done)
+		for guildID, instance := range vm.Instances {
+			if instance != nil {
+				log.Printf("Cleaning up voice instance for guild %s", guildID)
+				if err := instance.Leave(); err != nil {
+					log.Printf("Error cleaning up voice instance for guild %s: %v", guildID, err)
+				}
+				delete(vm.Instances, guildID)
+			}
+		}
+	}()
+
+	// Wait for cleanup to complete or timeout
+	select {
+	case <-done:
+		log.Println("Voice manager cleanup completed")
+	case <-time.After(5 * time.Second):
+		log.Println("Warning: Voice manager cleanup timed out")
+	}
+}
+
 // GetVoiceInstance gets or creates a voice instance for a guild
 func (vm *VoiceManager) GetVoiceInstance(guildID string) *VoiceInstance {
 	vm.Mu.Lock()
@@ -134,16 +165,39 @@ func (vi *VoiceInstance) Leave() error {
 
 	// Stop any playing audio
 	if vi.StopChan != nil {
+		// Use a non-blocking send with a timeout
 		select {
 		case vi.StopChan <- true:
-			// Successfully sent stop signal
-		default:
-			// Channel is full or closed, no need to block
+			log.Println("Sent stop signal to audio player")
+		case <-time.After(100 * time.Millisecond):
+			log.Println("Timeout sending stop signal, continuing with disconnect")
 		}
+
+		// Give a short time for the audio to stop
+		timer := time.NewTimer(100 * time.Millisecond)
+		defer timer.Stop()
+
+		// Reset the stop channel
+		close(vi.StopChan)
+		vi.StopChan = make(chan bool, 1)
 	}
 
-	// Disconnect from voice
-	err := vi.Connection.Disconnect()
+	// Disconnect from voice with a timeout
+	done := make(chan struct{})
+	var err error
+
+	go func() {
+		err = vi.Connection.Disconnect()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Disconnect completed
+	case <-time.After(2 * time.Second):
+		log.Println("Timeout disconnecting from voice, forcing close")
+	}
+
 	if err != nil {
 		log.Printf("Error disconnecting from voice: %v", err)
 	}
@@ -154,12 +208,6 @@ func (vi *VoiceInstance) Leave() error {
 	vi.IsPlaying = false
 	vi.CurrentURL = ""
 	vi.Queue = nil
-
-	// Reset stop channel
-	if vi.StopChan != nil {
-		close(vi.StopChan)
-		vi.StopChan = make(chan bool, 1)
-	}
 
 	log.Printf("Successfully left voice channel in guild %s", vi.GuildID)
 	return nil
@@ -221,7 +269,12 @@ func (vi *VoiceInstance) PlayAudio(filePath string) error {
 			"-ar", "48000",           // Audio sample rate (48kHz)
 			"-ac", "2",               // Audio channels (stereo)
 			"-loglevel", "warning",    // Only show warnings and errors
-			"pipe:1")                 // Output to stdout
+			"-af", "volume=0.5",        // Adjust volume if needed
+			"-acodec", "pcm_s16le",    // Force PCM signed 16-bit little-endian codec
+			"-ar", "48000",            // Force 48kHz sample rate
+			"-ac", "2",                // Force stereo
+			"-f", "s16le",             // Force output format
+			"pipe:1")                  // Output to stdout
 
 		// Get the command's stdout pipe
 		stdout, err := cmd.StdoutPipe()
@@ -247,9 +300,14 @@ func (vi *VoiceInstance) PlayAudio(filePath string) error {
 		// Buffer for reading audio data (20ms of stereo audio at 48kHz = 3840 bytes)
 		buffer := make([]byte, 3840)
 
+
+		// Create a ticker for consistent timing (20ms = 50fps)
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+
 		for {
 			// Read raw PCM data
-			n, err := io.ReadFull(stdout, buffer)
+			_, err := io.ReadFull(stdout, buffer)
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
 			} else if err != nil {
@@ -258,9 +316,22 @@ func (vi *VoiceInstance) PlayAudio(filePath string) error {
 			}
 
 			// Send the raw PCM data to Discord
-			// Discord will handle the Opus encoding internally
-			vi.Connection.OpusSend <- buffer[:n]
-			// Small delay to prevent overwhelming the connection
+			select {
+			case vi.Connection.OpusSend <- buffer:
+				// Data sent successfully
+			case <-ticker.C:
+				// Skip frame if we can't keep up
+				log.Println("Warning: Dropping audio frame - buffer full")
+			}
+
+			// Wait for next tick to maintain consistent timing
+			<-ticker.C
+		}
+
+		// Send silence to ensure the audio finishes playing
+		silence := make([]byte, 3840)
+		for i := 0; i < 5; i++ { // 100ms of silence
+			vi.Connection.OpusSend <- silence
 			time.Sleep(20 * time.Millisecond)
 		}
 	}()
