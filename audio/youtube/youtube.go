@@ -244,10 +244,13 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 		defer close(done)
 		
 		// Buffer for reading audio data
-		const frameSize = 960 // 20ms of 48kHz stereo audio (48000 * 2 * 2 * 0.02 / 4)
+		// Using a smaller frame size to prevent UDP packet size issues
+		const frameSize = 480 // 5ms of 48kHz stereo audio (48000 * 2 * 2 * 0.005 / 4)
 		buffer := make([]byte, frameSize)
 		totalBytes := 0
 		startTime := time.Now()
+		lastLogTime := time.Now()
+		bytesSinceLastLog := 0
 
 		for {
 			// Read audio data from FFmpeg
@@ -267,25 +270,36 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 			}
 
 			totalBytes += n
+			bytesSinceLastLog += n
 
-			// Send the audio data to Discord
-			select {
-			case vc.OpusSend <- buffer[:n]:
-				// Log progress every second
-				if totalBytes%(frameSize*50) == 0 { // ~1 second of audio (50 frames)
-					elapsed := time.Since(startTime).Seconds()
-					log.Printf("Sent %d KB (%.1f KB/s)",
-						totalBytes/1024,
-						float64(totalBytes)/1024/elapsed)
+			// Split the buffer into smaller chunks if needed
+			for i := 0; i < n; i += frameSize {
+				chunkEnd := i + frameSize
+				if chunkEnd > n {
+					chunkEnd = n
 				}
 
-			case <-time.After(5 * time.Second):
-				log.Printf("Warning: Timeout waiting to send audio data")
-				return
-			}
+				// Send the audio data to Discord
+				select {
+				case vc.OpusSend <- buffer[i:chunkEnd]:
+					// Log progress every second
+					if time.Since(lastLogTime) >= time.Second {
+						elapsed := time.Since(startTime).Seconds()
+						log.Printf("Sent %d KB (%.1f KB/s)",
+							totalBytes/1024,
+							float64(bytesSinceLastLog)/1024/elapsed)
+						lastLogTime = time.Now()
+						bytesSinceLastLog = 0
+					}
 
-			// Small delay to prevent overwhelming the connection
-			time.Sleep(20 * time.Millisecond)
+				case <-time.After(5 * time.Second):
+					log.Printf("Warning: Timeout waiting to send audio data")
+					return
+				}
+
+				// Small delay to prevent overwhelming the connection
+				time.Sleep(5 * time.Millisecond) // Reduced delay for smaller chunks
+			}
 		}
 	}()
 
