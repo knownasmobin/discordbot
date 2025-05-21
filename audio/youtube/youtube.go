@@ -3,6 +3,7 @@ package youtube
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,8 +90,12 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 	outputPath := filepath.Join(c.CacheDir, fmt.Sprintf("%s.%%(ext)s", videoID))
 
-	// Create command to download audio using yt-dlp
-	cmd := exec.Command("yt-dlp",
+	// Get cookie file path from environment
+	cookieFile := os.Getenv("YT_COOKIE_FILE")
+
+
+	// Create base command
+	args := []string{
 		"-x",                      // Extract audio
 		"--audio-format", "mp3",   // Convert to MP3
 		"-o", outputPath,          // Output path
@@ -103,8 +108,24 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 		"--default-search", "auto", // Auto-detect URL type
 		"--prefer-ffmpeg",         // Prefer ffmpeg for post-processing
 		"--ffmpeg-location", "",   // Use system ffmpeg
-		"https://youtube.com/watch?v="+videoID,
-	)
+	}
+
+
+	// Add cookie file if specified
+	if cookieFile != "" {
+		if _, err := os.Stat(cookieFile); err == nil {
+			args = append(args, "--cookies", cookieFile)
+		} else {
+			log.Printf("Warning: Cookie file not found at %s", cookieFile)
+		}
+	}
+
+	// Add the video URL
+	args = append(args, "https://youtube.com/watch?v="+videoID)
+
+
+	// Create command with arguments
+	cmd := exec.Command("yt-dlp", args...)
 
 
 	// Run the command and capture combined output (stdout + stderr)
