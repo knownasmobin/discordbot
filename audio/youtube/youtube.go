@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/bwmarrin/dgvoice"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -93,23 +95,21 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	// Get cookie file path from environment
 	cookieFile := os.Getenv("YT_COOKIE_FILE")
 
-
 	// Create base command
 	args := []string{
-		"-x",                      // Extract audio
-		"--audio-format", "mp3",   // Convert to MP3
-		"-o", outputPath,          // Output path
-		"--no-playlist",           // Don't download playlists
-		"--no-warnings",           // Suppress warnings
-		"--quiet",                 // Quiet mode
-		"--no-cache-dir",          // Don't use cache
-		"--no-check-certificate",   // Skip SSL certificate verification
-		"--audio-quality", "0",    // Best audio quality
+		"-x",                    // Extract audio
+		"--audio-format", "mp3", // Convert to MP3
+		"-o", outputPath, // Output path
+		"--no-playlist",          // Don't download playlists
+		"--no-warnings",          // Suppress warnings
+		"--quiet",                // Quiet mode
+		"--no-cache-dir",         // Don't use cache
+		"--no-check-certificate", // Skip SSL certificate verification
+		"--audio-quality", "0",   // Best audio quality
 		"--default-search", "auto", // Auto-detect URL type
-		"--prefer-ffmpeg",         // Prefer ffmpeg for post-processing
-		"--ffmpeg-location", "",   // Use system ffmpeg
+		"--prefer-ffmpeg",                                                                       // Prefer ffmpeg for post-processing
+		"--ffmpeg-location", "/home/ec2-user/discordbot/ffmpeg-n6.1-latest-linux64-gpl-6.1/bin", // Use system ffmpeg
 	}
-
 
 	// Add cookie file if specified
 	if cookieFile != "" {
@@ -123,10 +123,8 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	// Add the video URL
 	args = append(args, "https://youtube.com/watch?v="+videoID)
 
-
 	// Create command with arguments
 	cmd := exec.Command("yt-dlp", args...)
-
 
 	// Run the command and capture combined output (stdout + stderr)
 	output, err := cmd.CombinedOutput()
@@ -145,69 +143,159 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 
 // Play plays YouTube audio in a Discord voice channel
 func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
-	// Extract video ID from URL
+	log.Printf("Play called with URL: %s", url)
+
+	if vc == nil {
+		err := fmt.Errorf("voice connection is nil")
+		log.Printf("Play error: %v", err)
+		return err
+	}
+
 	videoID, err := c.GetVideoID(url)
 	if err != nil {
-		return fmt.Errorf("invalid YouTube URL: %v", err)
+		err = fmt.Errorf("invalid YouTube URL: %v", err)
+		log.Printf("GetVideoID error: %v", err)
+		return err
 	}
+	log.Printf("Extracted video ID: %s", videoID)
 
-	// Download the audio
+	// Download the audio file
+	log.Printf("Starting audio download for video ID: %s", videoID)
 	audioFile, err := c.DownloadAudio(videoID)
 	if err != nil {
-		return fmt.Errorf("failed to download audio: %v", err)
+		err = fmt.Errorf("error downloading audio: %v", err)
+		log.Printf("DownloadAudio error: %v", err)
+		return err
 	}
+	log.Printf("Successfully downloaded audio to: %s", audioFile)
 	defer os.Remove(audioFile) // Clean up the file after playing
 
-	// Create a new FFmpeg audio source
-	ffmpegCmd := exec.Command("ffmpeg",
+	// Create a new FFmpeg command to convert the audio to Opus
+	ffmpegArgs := []string{
 		"-i", audioFile,
 		"-f", "s16le",
 		"-ar", "48000",
 		"-ac", "2",
 		"-loglevel", "warning",
-		"-hide_banner",
-		"-nostats",
+		"-acodec", "libopus",
+		"-f", "opus",
+		"-ar", "48000",
+		"-ac", "2",
+		"-b:a", "128k",
+		"-frame_duration", "20",
+		"-application", "audio",
+		"-vbr", "on",
+		"-compression_level", "10",
+		"-packet_loss", "1",
+		"-fec", "on",
+		"-dither_method", "triangular",
+		"-vbr", "on",
+		"-compression_level", "10",
+		"-application", "audio",
+		"-frame_duration", "20",
+		"-packet_loss", "1",
+		"-fec", "on",
+		"-dither_method", "triangular",
 		"pipe:1",
-	)
+	}
+
+	log.Printf("Starting FFmpeg with args: %v", ffmpegArgs)
+	ffmpegCmd := exec.Command("ffmpeg", ffmpegArgs...)
 
 	// Get the audio stream
 	audioStream, err := ffmpegCmd.StdoutPipe()
 	if err != nil {
+		log.Printf("Failed to create stdout pipe: %v", err)
 		return fmt.Errorf("failed to create stdout pipe: %v", err)
 	}
 
 	// Start FFmpeg
+	log.Printf("Starting FFmpeg process")
 	err = ffmpegCmd.Start()
 	if err != nil {
+		log.Printf("Failed to start FFmpeg: %v", err)
 		return fmt.Errorf("failed to start FFmpeg: %v", err)
 	}
-	defer ffmpegCmd.Process.Kill()
 
-	// Create a buffer for the audio data
-	buffer := make([][]byte, 0)
-	tempBuf := make([]byte, 1024)
+	// Cleanup function
+	cleanup := func() {
+		log.Printf("Cleaning up FFmpeg process")
+		if ffmpegCmd.Process != nil {
+			ffmpegCmd.Process.Kill()
+		}
+	}
+	defer cleanup()
 
-	// Read the audio data into the buffer
+	// Play the audio file
+	log.Printf("Creating new voice instance for playback")
+	dgv := dgvoice.NewVoice(vc, dgvoice.UseDCA)
+	if dgv == nil {
+		err := fmt.Errorf("failed to create voice instance")
+		log.Printf("Error creating voice instance: %v", err)
+		return err
+	}
+
+	log.Printf("Starting audio playback")
+	dgv.Speaking(true)
+	defer func() {
+		log.Printf("Playback finished, cleaning up")
+		dgv.Speaking(false)
+	}()
+
+	// Buffer for reading audio data
+	const frameSize = 960 // 20ms of 48kHz stereo audio (48000 * 2 * 2 * 0.02 / 4)
+	buffer := make([]byte, frameSize)
+	totalBytes := 0
+	startTime := time.Now()
+
 	for {
-		n, err := audioStream.Read(tempBuf)
+		// Read audio data from FFmpeg
+		n, err := audioStream.Read(buffer)
 		if err == io.EOF {
+			log.Printf("Reached end of audio stream")
 			break
 		}
 		if err != nil {
+			log.Printf("Error reading audio stream: %v", err)
 			return fmt.Errorf("error reading audio stream: %v", err)
 		}
 
-		buffer = append(buffer, tempBuf[:n])
+		// Only process complete frames
+		if n == 0 {
+			continue
+		}
+
+		totalBytes += n
+
+		// Send the audio data to Discord
+		select {
+		case vc.OpusSend <- buffer[:n]:
+			// Log progress every second
+			if totalBytes%(frameSize*50) == 0 { // ~1 second of audio (50 frames)
+				elapsed := time.Since(startTime).Seconds()
+				log.Printf("Sent %d KB (%.1f KB/s)",
+					totalBytes/1024,
+					float64(totalBytes)/1024/elapsed)
+			}
+
+		case <-vc.Done():
+			log.Printf("Voice connection closed, stopping playback")
+			return nil
+
+		case <-time.After(5 * time.Second):
+			log.Printf("Warning: Timeout waiting to send audio data")
+		}
+
+		// Small delay to prevent overwhelming the connection
+		time.Sleep(20 * time.Millisecond)
 	}
 
-	// Send the audio data to Discord
-	vc.Speaking(true)
-	defer vc.Speaking(false)
+	elapsed := time.Since(startTime).Seconds()
+	log.Printf("Finished playback: %d bytes in %.1f seconds (%.1f KB/s)",
+		totalBytes, elapsed, float64(totalBytes)/1024/elapsed)
 
-	// Send the audio data in chunks
-	for _, chunk := range buffer {
-		vc.OpusSend <- chunk
-	}
+	// Small delay to ensure all data is sent
+	time.Sleep(100 * time.Millisecond)
 
 	return nil
 }

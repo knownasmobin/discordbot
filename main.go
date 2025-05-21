@@ -131,41 +131,80 @@ func main() {
 
 	fmt.Println("Bot is now running. Press Ctrl+C to exit.")
 
-	// Wait here until CTRL+C or other term signal is received
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-	<-sc
+	// Set up a channel to listen for interrupt signals
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 
-	// Clean up
-	for _, instance := range voiceManager.Instances {
-		if instance.Connection != nil {
-			instance.Leave()
-		}
-	}
+	// Set up a channel to wait for the interrupt signal
+	done := make(chan struct{})
 
-	// Delete all commands when shutting down
-	log.Println("Removing commands...")
-	for _, cmd := range registeredCommands {
-		if cmd != nil {
-			err := discord.ApplicationCommandDelete(discord.State.User.ID, "", cmd.ID)
-			if err != nil {
-				log.Printf("Cannot delete '%v' command: %v", cmd.Name, err)
+	// Start a goroutine to handle cleanup when receiving an interrupt signal
+	go func() {
+		// Wait for the interrupt signal
+		sig := <-interrupt
+		log.Printf("Received signal: %v. Shutting down gracefully...\n", sig)
+
+		// Clean up voice connections
+		log.Println("Disconnecting from voice channels...")
+		for guildID, instance := range voiceManager.Instances {
+			if instance.Connection != nil {
+				log.Printf("Leaving voice channel in guild %s", guildID)
+				err := instance.Leave()
+				if err != nil {
+					log.Printf("Error leaving voice channel in guild %s: %v", guildID, err)
+				}
 			}
 		}
-	}
 
-	// Cleanly close down the Discord session
-	discord.Close()
+		// Delete all registered commands
+		log.Println("Removing application commands...")
+		for i, cmd := range registeredCommands {
+			if cmd != nil {
+				log.Printf("Deleting command: %s", cmd.Name)
+				err := discord.ApplicationCommandDelete(discord.State.User.ID, "", cmd.ID)
+				if err != nil {
+					log.Printf("Cannot delete '%v' command: %v", cmd.Name, err)
+				} else {
+					registeredCommands[i] = nil // Mark as deleted
+				}
+			}
+		}
+
+		// Close the Discord session
+		log.Println("Closing Discord session...")
+		err := discord.Close()
+		if err != nil {
+			log.Printf("Error closing Discord session: %v", err)
+		}
+
+		close(done) // Signal that cleanup is complete
+	}()
+
+	// Wait for the interrupt signal and cleanup to complete
+	log.Println("Bot is now running. Press Ctrl+C to exit.")
+	<-done
+	log.Println("Bot has shut down gracefully.")
 }
 
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Log all incoming interactions for debugging
+	log.Printf("Received interaction: Type=%s, Command=%s, GuildID=%s, ChannelID=%s, UserID=%s", 
+		i.Type.String(), 
+		i.ApplicationCommandData().Name, 
+		i.GuildID, 
+		i.ChannelID, 
+		i.Member.User.ID)
+
 	// Handle the command
 	if i.Type != discordgo.InteractionApplicationCommand {
+		log.Printf("Ignoring non-command interaction: %s", i.Type.String())
 		return
 	}
 
 	// Add a defer response to prevent "Unknown Integration" errors
 	initialContent := "Processing your command..."
+	log.Printf("Sending initial response for command: %s", i.ApplicationCommandData().Name)
+	
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -174,11 +213,20 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 	if err != nil {
 		log.Printf("Error responding to interaction: %v", err)
+		// Try to send a follow-up message if the initial response fails
+		_, followUpErr := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "Error: Failed to process your command. Please try again.",
+		})
+		if followUpErr != nil {
+			log.Printf("Failed to send follow-up message: %v", followUpErr)
+		}
 		return
 	}
 
 	// Get the voice instance for this guild
+	log.Printf("Getting voice instance for guild: %s", i.GuildID)
 	vi := voiceManager.GetVoiceInstance(i.GuildID)
+	log.Printf("Current voice instance state - IsPlaying: %v, Queue length: %d", vi.IsPlaying, len(vi.Queue))
 
 	switch i.ApplicationCommandData().Name {
 	case "ping":
@@ -265,17 +313,30 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			}
 		}
 
-		// Add the URL to the queue
+		log.Printf("Adding URL to queue: %s", url)
 		vi.AddToQueue(url)
+		log.Printf("Queue length after add: %d", len(vi.Queue))
 
+		// Update the interaction to show we're starting to play
 		content := fmt.Sprintf("Added to queue: %s", url)
-		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		log.Printf("Updating interaction with queue status")
+		_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 			Content: &content,
 		})
+		if err != nil {
+			log.Printf("Failed to update interaction: %v", err)
+		}
 
-		// If nothing is playing, start playing
-		if !vi.IsPlaying {
+		vi.Mu.Lock()
+		isPlaying := vi.IsPlaying
+		vi.Mu.Unlock()
+
+		log.Printf("Current play status - IsPlaying: %v", isPlaying)
+		if !isPlaying {
+			log.Printf("Starting playback in a new goroutine")
 			go playNextInQueue(s, i.ChannelID, vi)
+		} else {
+			log.Printf("Already playing, added to queue")
 		}
 
 	case "queue":
@@ -330,9 +391,12 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			vi.AddToQueue(url)
 
 			content := fmt.Sprintf("Added to queue: %s", url)
-			s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 				Content: &content,
 			})
+			if err != nil {
+				log.Printf("Failed to update interaction: %v", err)
+			}
 
 			// If nothing is playing, start playing
 			if !vi.IsPlaying {
@@ -390,22 +454,30 @@ func findUserVoiceState(s *discordgo.Session, guildID, userID string) (*discordg
 
 // playNextInQueue plays the next item in the queue
 func playNextInQueue(s *discordgo.Session, channelID string, vi *audio.VoiceInstance) {
+	log.Printf("playNextInQueue started for channel: %s", channelID)
+	
 	url, ok := vi.GetNextFromQueue()
 	if !ok {
+		log.Println("No more items in queue, stopping playback")
 		vi.Mu.Lock()
 		vi.IsPlaying = false
 		vi.Mu.Unlock()
 		return
 	}
 
+	log.Printf("Got next URL from queue: %s", url)
+
 	vi.Mu.Lock()
 	vi.IsPlaying = true
 	vi.Mu.Unlock()
 
-	// Send message to channel
+	log.Printf("Sending download message to channel")
+	// Send initial message
 	message, err := s.ChannelMessageSend(channelID, fmt.Sprintf("Downloading: %s", url))
 	if err != nil {
-		log.Printf("Failed to send message: %v", err)
+		log.Printf("Failed to send download message: %v", err)
+	} else {
+		log.Printf("Download message sent with ID: %s", message.ID)
 	}
 
 	var audioFile string
