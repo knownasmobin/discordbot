@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bwmarrin/dgvoice"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -226,73 +225,79 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 	}
 	defer cleanup()
 
-	// Play the audio file
-	log.Printf("Creating new voice instance for playback")
-	dgv := dgvoice.NewVoice(vc, dgvoice.UseDCA)
-	if dgv == nil {
-		err := fmt.Errorf("failed to create voice instance")
-		log.Printf("Error creating voice instance: %v", err)
-		return err
-	}
-
+	// Play the audio file using dgvoice
 	log.Printf("Starting audio playback")
-	dgv.Speaking(true)
-	defer func() {
-		log.Printf("Playback finished, cleaning up")
-		dgv.Speaking(false)
-	}()
+	
+	// Set speaking state
+	err = vc.Speaking(true)
+	if err != nil {
+		log.Printf("Error setting speaking state: %v", err)
+		return fmt.Errorf("error setting speaking state: %v", err)
+	}
+	defer vc.Speaking(false)
 
-	// Buffer for reading audio data
-	const frameSize = 960 // 20ms of 48kHz stereo audio (48000 * 2 * 2 * 0.02 / 4)
-	buffer := make([]byte, frameSize)
-	totalBytes := 0
-	startTime := time.Now()
+	// Create a done channel to signal when playback is complete
+	done := make(chan bool)
 
-	for {
-		// Read audio data from FFmpeg
-		n, err := audioStream.Read(buffer)
-		if err == io.EOF {
-			log.Printf("Reached end of audio stream")
-			break
-		}
-		if err != nil {
-			log.Printf("Error reading audio stream: %v", err)
-			return fmt.Errorf("error reading audio stream: %v", err)
-		}
+	// Start a goroutine to handle playback
+	go func() {
+		defer close(done)
+		
+		// Buffer for reading audio data
+		const frameSize = 960 // 20ms of 48kHz stereo audio (48000 * 2 * 2 * 0.02 / 4)
+		buffer := make([]byte, frameSize)
+		totalBytes := 0
+		startTime := time.Now()
 
-		// Only process complete frames
-		if n == 0 {
-			continue
-		}
-
-		totalBytes += n
-
-		// Send the audio data to Discord
-		select {
-		case vc.OpusSend <- buffer[:n]:
-			// Log progress every second
-			if totalBytes%(frameSize*50) == 0 { // ~1 second of audio (50 frames)
-				elapsed := time.Since(startTime).Seconds()
-				log.Printf("Sent %d KB (%.1f KB/s)",
-					totalBytes/1024,
-					float64(totalBytes)/1024/elapsed)
+		for {
+			// Read audio data from FFmpeg
+			n, err := audioStream.Read(buffer)
+			if err == io.EOF {
+				log.Printf("Reached end of audio stream")
+				return
+			}
+			if err != nil {
+				log.Printf("Error reading audio stream: %v", err)
+				return
 			}
 
-		case <-vc.Done():
-			log.Printf("Voice connection closed, stopping playback")
-			return nil
+			// Only process complete frames
+			if n == 0 {
+				continue
+			}
 
-		case <-time.After(5 * time.Second):
-			log.Printf("Warning: Timeout waiting to send audio data")
+			totalBytes += n
+
+			// Send the audio data to Discord
+			select {
+			case vc.OpusSend <- buffer[:n]:
+				// Log progress every second
+				if totalBytes%(frameSize*50) == 0 { // ~1 second of audio (50 frames)
+					elapsed := time.Since(startTime).Seconds()
+					log.Printf("Sent %d KB (%.1f KB/s)",
+						totalBytes/1024,
+						float64(totalBytes)/1024/elapsed)
+				}
+
+			case <-time.After(5 * time.Second):
+				log.Printf("Warning: Timeout waiting to send audio data")
+				return
+			}
+
+			// Small delay to prevent overwhelming the connection
+			time.Sleep(20 * time.Millisecond)
 		}
+	}()
 
-		// Small delay to prevent overwhelming the connection
-		time.Sleep(20 * time.Millisecond)
+	// Wait for playback to complete or connection to close
+	select {
+	case <-done:
+		log.Printf("Playback completed")
+	case <-time.After(30 * time.Minute): // Safety timeout
+		log.Printf("Playback timed out after 30 minutes")
 	}
 
-	elapsed := time.Since(startTime).Seconds()
-	log.Printf("Finished playback: %d bytes in %.1f seconds (%.1f KB/s)",
-		totalBytes, elapsed, float64(totalBytes)/1024/elapsed)
+	// Note: Removed the final log statement since we're now tracking progress in the goroutine
 
 	// Small delay to ensure all data is sent
 	time.Sleep(100 * time.Millisecond)

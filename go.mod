@@ -5,6 +5,7 @@ go 1.23.0
 toolchain go1.24.3
 
 require (
+	github.com/bwmarrin/dgvoice v0.0.0-20210225172318-caaac756e02e
 	github.com/bwmarrin/discordgo v0.27.1
 	github.com/joho/godotenv v1.5.1
 	github.com/zmb3/spotify/v2 v2.3.1
@@ -19,7 +20,6 @@ require (
 )
 
 require (
-	github.com/bwmarrin/dgvoice v0.0.0-20210225172318-caaac756e02e // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/stretchr/testify v1.8.1 // indirect
 	golang.org/x/crypto v0.36.0 // indirect
