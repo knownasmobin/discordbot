@@ -105,21 +105,21 @@ var (
 // cleanupChildProcesses ensures all child processes are terminated when the application exits
 func cleanupChildProcesses() {
 	log.Println("Cleaning up child processes...")
-	
+
 	// Try to get the process group ID
 	pgid, err := syscall.Getpgid(0)
 	if err != nil {
 		log.Printf("Failed to get process group ID: %v", err)
 		pgid = 0
 	}
-	
+
 	// First try to kill the entire process group
 	if pgid != 0 {
 		if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
 			log.Printf("Failed to kill process group: %v", err)
 		}
 	}
-	
+
 	// Then try to kill individual child processes
 	cmd := exec.Command("ps", "-o", "pid=", "--ppid", fmt.Sprint(os.Getpid()))
 	output, err := cmd.Output()
@@ -127,7 +127,7 @@ func cleanupChildProcesses() {
 		log.Printf("Failed to list child processes: %v", err)
 		return
 	}
-	
+
 	// Kill each child process
 	for _, pidStr := range strings.Fields(string(output)) {
 		pid, err := strconv.Atoi(pidStr)
@@ -135,7 +135,7 @@ func cleanupChildProcesses() {
 			log.Printf("Invalid PID %s: %v", pidStr, err)
 			continue
 		}
-		
+
 		// Try to kill the process
 		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 			log.Printf("Failed to kill process %d: %v", pid, err)
@@ -157,13 +157,13 @@ func main() {
 	defer func() {
 		log.Println("Shutting down...")
 		cancelFunc()
-		
+
 		// Clean up voice connections
 		if voiceManager != nil {
 			log.Println("Cleaning up voice connections...")
 			voiceManager.Cleanup()
 		}
-		
+
 		// Clean up any remaining processes
 		cleanupChildProcesses()
 		log.Println("Shutdown complete")
@@ -294,11 +294,11 @@ func main() {
 
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Log all incoming interactions for debugging
-	log.Printf("Received interaction: Type=%s, Command=%s, GuildID=%s, ChannelID=%s, UserID=%s", 
-		i.Type.String(), 
-		i.ApplicationCommandData().Name, 
-		i.GuildID, 
-		i.ChannelID, 
+	log.Printf("Received interaction: Type=%s, Command=%s, GuildID=%s, ChannelID=%s, UserID=%s",
+		i.Type.String(),
+		i.ApplicationCommandData().Name,
+		i.GuildID,
+		i.ChannelID,
 		i.Member.User.ID)
 
 	// Handle the command
@@ -310,7 +310,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Add a defer response to prevent "Unknown Integration" errors
 	initialContent := "Processing your command..."
 	log.Printf("Sending initial response for command: %s", i.ApplicationCommandData().Name)
-	
+
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -570,7 +570,7 @@ func findUserVoiceState(s *discordgo.Session, guildID, userID string) (*discordg
 // playNextInQueue plays the next item in the queue
 func playNextInQueue(s *discordgo.Session, channelID string, vi *audio.VoiceInstance) {
 	log.Printf("playNextInQueue started for channel: %s", channelID)
-	
+
 	url, ok := vi.GetNextFromQueue()
 	if !ok {
 		log.Println("No more items in queue, stopping playback")

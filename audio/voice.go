@@ -1,6 +1,8 @@
 package audio
 
 import (
+	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"layeh.com/gopus"
 )
 
 // VoiceInstance represents a voice connection to a Discord guild
@@ -47,7 +50,7 @@ func (vm *VoiceManager) Cleanup() {
 
 	// Create a channel to track cleanup completion
 	done := make(chan struct{})
-	
+
 	// Start cleanup in a goroutine
 	go func() {
 		defer close(done)
@@ -265,25 +268,24 @@ func (vi *VoiceInstance) PlayAudio(filePath string) error {
 
 		// Create a command to convert the audio to raw PCM and send to stdout
 		cmd := exec.Command("ffmpeg",
-			"-i", filePath,           // Input file
-			"-f", "s16le",            // Output format (signed 16-bit little-endian)
-			"-ar", "48000",           // Audio sample rate (48kHz)
-			"-ac", "2",               // Audio channels (stereo)
-			"-loglevel", "warning",    // Only show warnings and errors
+			"-i", filePath, // Input file
+			"-f", "s16le", // Output format (signed 16-bit little-endian)
+			"-ar", "48000", // Audio sample rate (48kHz)
+			"-ac", "2", // Audio channels (stereo)
+			"-loglevel", "warning", // Only show warnings and errors
 			"-af", "volume=0.5,aresample=async=1000", // Adjust volume and resample
-			"-acodec", "pcm_s16le",    // Force PCM signed 16-bit little-endian codec
-			"-ar", "48000",            // Force 48kHz sample rate
-			"-ac", "2",                // Force stereo
-			"-f", "s16le",             // Force output format
-			"-fflags", "nobuffer",     // Reduce input buffering
-			"-flags", "low_delay",     // Reduce latency
-			"-probesize", "32",        // Reduce probe size
-			"-analyzeduration", "0",   // Don't analyze the entire file
-			"pipe:1")                  // Output to stdout
+			"-acodec", "pcm_s16le", // Force PCM signed 16-bit little-endian codec
+			"-ar", "48000", // Force 48kHz sample rate
+			"-ac", "2", // Force stereo
+			"-f", "s16le", // Force output format
+			"-fflags", "nobuffer", // Reduce input buffering
+			"-flags", "low_delay", // Reduce latency
+			"-probesize", "32", // Reduce probe size
+			"-analyzeduration", "0", // Don't analyze the entire file
+			"pipe:1") // Output to stdout
 
 		// Create a buffer for reading audio data (60ms of stereo audio at 48kHz = 11520 bytes)
 		// Using a larger buffer to reduce the number of reads
-		buffer := make([]byte, 11520)
 
 		// Get the command's stdout pipe
 		stdout, err := cmd.StdoutPipe()
@@ -291,6 +293,8 @@ func (vi *VoiceInstance) PlayAudio(filePath string) error {
 			log.Printf("Error creating stdout pipe: %v", err)
 			return
 		}
+
+		buffer := bufio.NewReaderSize(stdout, 16384)
 
 		// Set process group ID to allow killing child processes
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -310,40 +314,80 @@ func (vi *VoiceInstance) PlayAudio(filePath string) error {
 			}
 		}()
 
-		// Create a ticker for consistent timing (60ms = ~16.67fps)
-		ticker := time.NewTicker(60 * time.Millisecond)
-		defer ticker.Stop()
+		const FRAME_SIZE = 960
+		const CHANNELS = 2
+		const MAX_BYTES = FRAME_SIZE * 4
+		const FRAME_RATE int = 48000
+		encoder, err := gopus.NewEncoder(FRAME_RATE, CHANNELS, gopus.Audio)
 
 		for {
+			ab := make([]int16, FRAME_SIZE*CHANNELS)
+			err := binary.Read(buffer, binary.LittleEndian, &ab)
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return
+			}
+			if err != nil {
+				fmt.Println("Err buffer: %v", err)
+				return
+			}
+			if !vi.Connection.Ready || vi.Connection.OpusSend == nil {
+				fmt.Printf("Discordgo not ready for opus packets. %+v : %+v", vi.Connection.Ready, vi.Connection.OpusSend)
+				return
+			}
+
+			opus, err := encoder.Encode(ab, FRAME_SIZE, MAX_BYTES)
+			if err != nil {
+				fmt.Println("Encoding error,", err)
+				return
+			}
+
 			select {
-			case <-ticker.C:
-				// Read raw PCM data with timeout
-				n, err := stdout.Read(buffer)
-				if err == io.EOF {
-					// End of file, we're done
-					return
-				} else if err != nil {
-					log.Printf("Error reading audio data: %v", err)
-					return
-				}
+			case vi.Connection.OpusSend <- opus:
+				// Frame sent successfully
+			case <-time.After(1000 * time.Millisecond):
+				// Skip frame if we can't send it in time
+				log.Println("Warning: Frame send timeout, dropping frame")
+			}
 
-				// Only send if we have data
-				if n > 0 {
-					// Copy the buffer to ensure we don't modify it while it's being sent
-					frame := make([]byte, n)
-					copy(frame, buffer[:n])
+		}
 
-					// Send the frame with a timeout
-					select {
-					case vi.Connection.OpusSend <- frame:
-						// Frame sent successfully
-					case <-time.After(100 * time.Millisecond):
-						// Skip frame if we can't send it in time
-						log.Println("Warning: Frame send timeout, dropping frame")
+		return
+		/*
+			// Create a ticker for consistent timing (60ms = ~16.67fps)
+			ticker := time.NewTicker(60 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ticker.C:
+					// Read raw PCM data with timeout
+					n, err := stdout.Read(buffer)
+					if err == io.EOF {
+						// End of file, we're done
+						return
+					} else if err != nil {
+						log.Printf("Error reading audio data: %v", err)
+						return
+					}
+
+					// Only send if we have data
+					if n > 0 {
+						// Copy the buffer to ensure we don't modify it while it's being sent
+						frame := make([]byte, n)
+						copy(frame, buffer[:n])
+
+						// Send the frame with a timeout
+						select {
+						case vi.Connection.OpusSend <- frame:
+							// Frame sent successfully
+						case <-time.After(100 * time.Millisecond):
+							// Skip frame if we can't send it in time
+							log.Println("Warning: Frame send timeout, dropping frame")
+						}
 					}
 				}
 			}
-		}
+		*/
 	}()
 
 	return nil
