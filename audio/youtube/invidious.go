@@ -6,13 +6,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
-// InvidiousClient handles interactions with Invidious instances
+// InvidiousClient represents a client for the Invidious API
 type InvidiousClient struct {
-	Instances  []string
-	httpClient *http.Client
+	BaseURL    string
+	HTTPClient *http.Client
 }
 
 // InvidiousVideo represents video information from Invidious API
@@ -50,103 +49,76 @@ type InvidiousSearchResult struct {
 	} `json:"thumbnails"`
 }
 
-// NewInvidiousClient creates a new Invidious client with default instances
+// NewInvidiousClient creates a new Invidious client
 func NewInvidiousClient() *InvidiousClient {
 	return &InvidiousClient{
-		Instances: []string{
-			"https://yewtu.be",
-			"https://invidious.snopyta.org",
-			"https://invidious.kavin.rocks",
-			"https://vid.puffyan.us",
-			"https://inv.riverside.rocks",
-			"https://invidio.xamh.de",
-		},
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		BaseURL:    "https://invidious.snopyta.org",
+		HTTPClient: &http.Client{},
 	}
 }
 
-// GetVideoInfo retrieves video information from Invidious instances
-func (ic *InvidiousClient) GetVideoInfo(videoID string) (*InvidiousVideo, error) {
-	var lastErr error
-
-	for _, instance := range ic.Instances {
-		apiURL := fmt.Sprintf("%s/api/v1/videos/%s", instance, videoID)
-		fmt.Printf("Trying to get video info from Invidious instance: %s\n", instance)
-
-		resp, err := ic.httpClient.Get(apiURL)
-		if err != nil {
-			lastErr = err
-			fmt.Printf("Error accessing Invidious instance %s: %v\n", instance, err)
-			continue
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("Invidious instance %s returned status code %d", instance, resp.StatusCode)
-			fmt.Println(lastErr)
-			continue
-		}
-
-		var video InvidiousVideo
-		if err := json.NewDecoder(resp.Body).Decode(&video); err != nil {
-			lastErr = err
-			fmt.Printf("Error decoding response from %s: %v\n", instance, err)
-			continue
-		}
-
-		fmt.Printf("Successfully retrieved video info from %s: %s\n", instance, video.Title)
-		return &video, nil
-	}
-
-	return nil, fmt.Errorf("failed to get video info from any Invidious instance: %v", lastErr)
+// GetInvidiousWatchURL returns the Invidious watch URL for a video ID
+func (c *InvidiousClient) GetInvidiousWatchURL(videoID string) string {
+	return fmt.Sprintf("%s/watch?v=%s", c.BaseURL, videoID)
 }
 
-// SearchVideos searches for videos using Invidious instances
-func (ic *InvidiousClient) SearchVideos(query string, limit int) ([]InvidiousSearchResult, error) {
-	var lastErr error
+// GetVideoInfo gets video information from Invidious
+func (c *InvidiousClient) GetVideoInfo(videoID string) (*VideoInfo, error) {
+	url := fmt.Sprintf("%s/api/v1/videos/%s", c.BaseURL, videoID)
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get video info: %v", err)
+	}
+	defer resp.Body.Close()
 
-	for _, instance := range ic.Instances {
-		// Encode the query for URL
-		encodedQuery := url.QueryEscape(query)
-		apiURL := fmt.Sprintf("%s/api/v1/search?q=%s&type=video&limit=%d", instance, encodedQuery, limit)
-		fmt.Printf("Searching on Invidious instance: %s\n", instance)
-
-		resp, err := ic.httpClient.Get(apiURL)
-		if err != nil {
-			lastErr = err
-			fmt.Printf("Error accessing Invidious instance %s: %v\n", instance, err)
-			continue
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("Invidious instance %s returned status code %d", instance, resp.StatusCode)
-			fmt.Println(lastErr)
-			continue
-		}
-
-		var results []InvidiousSearchResult
-		if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
-			lastErr = err
-			fmt.Printf("Error decoding response from %s: %v\n", instance, err)
-			continue
-		}
-
-		// Filter out non-video results
-		videoResults := make([]InvidiousSearchResult, 0)
-		for _, result := range results {
-			if result.Type == "video" {
-				videoResults = append(videoResults, result)
-			}
-		}
-
-		fmt.Printf("Found %d videos on %s\n", len(videoResults), instance)
-		return videoResults, nil
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get video info: status code %d", resp.StatusCode)
 	}
 
-	return nil, fmt.Errorf("failed to search on any Invidious instance: %v", lastErr)
+	var videoInfo VideoInfo
+	if err := json.NewDecoder(resp.Body).Decode(&videoInfo); err != nil {
+		return nil, fmt.Errorf("failed to decode video info: %v", err)
+	}
+
+	return &videoInfo, nil
+}
+
+// SearchVideos searches for videos using the Invidious API
+func (c *InvidiousClient) SearchVideos(query string, maxResults int) ([]VideoResult, error) {
+	searchURL := fmt.Sprintf("%s/api/v1/search?q=%s&type=video&sort_by=relevance",
+		c.BaseURL,
+		url.QueryEscape(query))
+
+	resp, err := c.HTTPClient.Get(searchURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search videos: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to search videos: status code %d", resp.StatusCode)
+	}
+
+	var results []VideoResult
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		return nil, fmt.Errorf("failed to decode search results: %v", err)
+	}
+
+	// Limit results to maxResults
+	if len(results) > maxResults {
+		results = results[:maxResults]
+	}
+
+	return results, nil
+}
+
+// VideoInfo represents video information from Invidious
+type VideoInfo struct {
+	Title         string `json:"title"`
+	VideoID       string `json:"videoId"`
+	Author        string `json:"author"`
+	Description   string `json:"description"`
+	LengthSeconds int    `json:"lengthSeconds"`
 }
 
 // GetAudioStreamURL returns the best audio stream URL for a video
@@ -186,25 +158,9 @@ func (ic *InvidiousClient) GetAudioStreamURL(videoID string) (string, error) {
 	return bestStream.URL, nil
 }
 
-// GetInvidiousWatchURL returns a watch URL for a video on an Invidious instance
-func (ic *InvidiousClient) GetInvidiousWatchURL(videoID string) string {
-	// Use the first instance by default
-	if len(ic.Instances) > 0 {
-		return fmt.Sprintf("%s/watch?v=%s", ic.Instances[0], videoID)
-	}
-
-	// Fallback to yewtu.be if no instances are available
-	return fmt.Sprintf("https://yewtu.be/watch?v=%s", videoID)
-}
-
 // IsInvidiousURL checks if a URL is from an Invidious instance
 func (ic *InvidiousClient) IsInvidiousURL(urlStr string) bool {
-	for _, instance := range ic.Instances {
-		if strings.HasPrefix(urlStr, instance) {
-			return true
-		}
-	}
-	return false
+	return strings.HasPrefix(urlStr, ic.BaseURL)
 }
 
 // ExtractVideoIDFromInvidiousURL extracts the video ID from an Invidious URL

@@ -400,41 +400,69 @@ func playNextInQueue(s *discordgo.Session, channelID string, vi *audio.VoiceInst
 	vi.Mu.Unlock()
 
 	// Send message to channel
-	message, _ := s.ChannelMessageSend(channelID, fmt.Sprintf("Playing: %s", url))
+	message, _ := s.ChannelMessageSend(channelID, fmt.Sprintf("Downloading: %s", url))
 
+	var audioFile string
 	var err error
+
 	// Determine if it's a YouTube or Spotify URL
 	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
-		err = youtubeClient.Play(vi.Connection, url)
-	} else if strings.Contains(url, "spotify.com") {
-		if spotifyClient == nil {
-			s.ChannelMessageSend(channelID, "Spotify support is not available")
+		// Extract video ID
+		videoID, err := youtubeClient.GetVideoID(url)
+		if err != nil {
+			s.ChannelMessageSend(channelID, "❌ Invalid YouTube URL")
 			vi.Mu.Lock()
 			vi.IsPlaying = false
 			vi.Mu.Unlock()
 			return
 		}
 
-		err = spotifyClient.PlayTrack(vi.Connection, url)
+		// Download the audio
+		audioFile, err = youtubeClient.DownloadAudio(videoID)
+		if err != nil {
+			s.ChannelMessageSend(channelID, fmt.Sprintf("❌ Error downloading audio: %v", err))
+			vi.Mu.Lock()
+			vi.IsPlaying = false
+			vi.Mu.Unlock()
+			return
+		}
+
+		// Clean up the audio file when done
+		defer os.Remove(audioFile)
+
+		// Update the message to show we're now playing
+		s.ChannelMessageEdit(channelID, message.ID, fmt.Sprintf("🎵 Now playing: %s", url))
+
+		// Play the audio file
+		err = vi.PlayAudio(audioFile)
+		if err != nil {
+			s.ChannelMessageSend(channelID, fmt.Sprintf("❌ Error playing audio: %v", err))
+		}
+
+	} else if strings.Contains(url, "spotify.com") {
+		if spotifyClient == nil {
+			s.ChannelMessageSend(channelID, "❌ Spotify support is not available")
+			vi.Mu.Lock()
+			vi.IsPlaying = false
+			vi.Mu.Unlock()
+			return
+		}
+
+		s.ChannelMessageSend(channelID, "❌ Spotify support is not yet implemented")
+		vi.Mu.Lock()
+		vi.IsPlaying = false
+		vi.Mu.Unlock()
+		return
 	} else {
-		s.ChannelMessageSend(channelID, "Unsupported URL. Please provide a YouTube or Spotify URL.")
+		s.ChannelMessageSend(channelID, "❌ Unsupported URL. Please provide a YouTube or Spotify URL.")
 		vi.Mu.Lock()
 		vi.IsPlaying = false
 		vi.Mu.Unlock()
 		return
 	}
 
-	if err != nil {
-		// Check for age restriction error
-		if strings.Contains(err.Error(), "login required to confirm your age") {
-			s.ChannelMessageSend(channelID, "⚠️ **Cannot play this video: Age-restricted content**\nThis video requires age verification on YouTube.")
-		} else {
-			s.ChannelMessageSend(channelID, fmt.Sprintf("Error playing: %v", err))
-		}
-	}
-
 	// Edit message to indicate track finished playing
-	s.ChannelMessageEdit(channelID, message.ID, fmt.Sprintf("Finished playing: %s", url))
+	s.ChannelMessageEdit(channelID, message.ID, fmt.Sprintf("✅ Finished playing: %s", url))
 
 	vi.Mu.Lock()
 	// Check repeat mode
