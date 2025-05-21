@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"sync"
 	"time"
 
@@ -177,14 +178,18 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 		"-ac", "2",                 // Audio channels: stereo
 		"-loglevel", "warning",     // Only show warnings and errors
 		"-acodec", "pcm_s16le",     // Output codec: 16-bit PCM
-		"-af", "bass=g=1,treble=g=1", // Slight audio enhancement
+		"-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary", // Normalize audio
+		"-fflags", "+discardcorrupt", // Handle corrupt frames gracefully
 		"-ss", "0",                 // Start from beginning
-		"-t", "0:10",               // Play first 10 seconds for testing (remove for full playback)
 		"-y",                       // Overwrite output file if it exists
 		"-re",                      // Read input at native frame rate
-		"-threads", "0",            // Use all available CPU threads
-		"-nostdin",                  // Don't expect any user input
-		"pipe:1",                    // Output to stdout
+		"-threads", "2",            // Use 2 threads to balance CPU usage
+		"-bufsize", "96k",          // Buffer size for audio
+		"-maxrate", "96k",          // Maximum bitrate
+		"-nostdin",                 // Don't expect any user input
+		"-probesize", "32",         // Faster probing
+		"-analyzeduration", "0",    // No limit on analysis duration
+		"pipe:1",                   // Output to stdout
 	}
 
 	log.Printf("Starting FFmpeg with args: %v", ffmpegArgs)
@@ -205,11 +210,25 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 		return fmt.Errorf("failed to start FFmpeg: %v", err)
 	}
 
+	// Create a process group for FFmpeg to allow killing child processes
+	ffmpegCmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true, // Create a new process group
+	}
+
 	// Cleanup function
 	cleanup := func() {
 		log.Printf("Cleaning up FFmpeg process")
 		if ffmpegCmd.Process != nil {
-			ffmpegCmd.Process.Kill()
+			// Kill the entire process group to ensure all child processes are terminated
+			pgid, err := syscall.Getpgid(ffmpegCmd.Process.Pid)
+			if err == nil {
+				// Negative PID means kill the entire process group
+				syscall.Kill(-pgid, syscall.SIGKILL)
+			} else {
+				log.Printf("Error getting process group: %v", err)
+				// Fallback to killing just the main process
+				ffmpegCmd.Process.Kill()
+			}
 		}
 	}
 	defer cleanup()
@@ -234,12 +253,25 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 		
 		// Buffer for reading audio data
 		// Using a smaller frame size to prevent UDP packet size issues
-		const frameSize = 480 // 5ms of 48kHz stereo audio (48000 * 2 * 2 * 0.005 / 4)
-		buffer := make([]byte, frameSize)
+		// 20ms frame size for 48kHz stereo audio (48000 * 2 * 2 * 0.02 = 3840 bytes)
+		// But we'll use a smaller chunk size to stay well under UDP limits
+		const (
+			sampleRate    = 48000
+			channels      = 2
+			bitsPerSample = 2 // 16-bit = 2 bytes
+			frameDuration = 20 * time.Millisecond
+			frameSize     = int((sampleRate * channels * bitsPerSample * int64(frameDuration)) / int64(time.Second))
+			bufferSize    = 1024 // Smaller chunks to stay under UDP MTU
+		)
+		
+		buffer := make([]byte, bufferSize)
 		totalBytes := 0
 		startTime := time.Now()
 		lastLogTime := time.Now()
 		bytesSinceLastLog := 0
+		
+		// Pre-allocate a buffer for the audio frame
+		frameBuffer := make([]byte, 0, frameSize)
 
 		for {
 			// Read audio data from FFmpeg
@@ -261,22 +293,24 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 			totalBytes += n
 			bytesSinceLastLog += n
 
-			// Split the buffer into smaller chunks if needed
-			for i := 0; i < n; i += frameSize {
-				chunkEnd := i + frameSize
-				if chunkEnd > n {
-					chunkEnd = n
-				}
+			// Append the new data to our frame buffer
+			frameBuffer = append(frameBuffer, buffer[:n]...)
 
-				// Send the audio data to Discord
+			// Process complete frames
+			for len(frameBuffer) >= frameSize {
+				// Get a complete frame
+				frame := frameBuffer[:frameSize]
+				
+				// Send the frame to Discord
 				select {
-				case vc.OpusSend <- buffer[i:chunkEnd]:
+				case vc.OpusSend <- frame:
 					// Log progress every second
 					if time.Since(lastLogTime) >= time.Second {
 						elapsed := time.Since(startTime).Seconds()
-						log.Printf("Sent %d KB (%.1f KB/s)",
+						kiloBytesSent := float64(bytesSinceLastLog) / 1024
+						log.Printf("Sent %d KB total (%.1f KB/s)",
 							totalBytes/1024,
-							float64(bytesSinceLastLog)/1024/elapsed)
+							kiloBytesSent/elapsed)
 						lastLogTime = time.Now()
 						bytesSinceLastLog = 0
 					}
@@ -286,8 +320,11 @@ func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
 					return
 				}
 
+				// Remove the sent frame from the buffer
+				frameBuffer = frameBuffer[frameSize:]
+				
 				// Small delay to prevent overwhelming the connection
-				time.Sleep(5 * time.Millisecond) // Reduced delay for smaller chunks
+				time.Sleep(frameDuration / 2) // Sleep for half the frame duration
 			}
 		}
 	}()

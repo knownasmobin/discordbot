@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -100,10 +102,62 @@ var (
 	cancelFunc context.CancelFunc
 )
 
+// cleanupChildProcesses ensures all child processes are terminated when the application exits
+func cleanupChildProcesses() {
+	log.Println("Cleaning up child processes...")
+	
+	// Try to get the process group ID
+	pgid, err := syscall.Getpgid(0)
+	if err != nil {
+		log.Printf("Failed to get process group ID: %v", err)
+		pgid = 0
+	}
+	
+	// First try to kill the entire process group
+	if pgid != 0 {
+		if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+			log.Printf("Failed to kill process group: %v", err)
+		}
+	}
+	
+	// Then try to kill individual child processes
+	cmd := exec.Command("ps", "-o", "pid=", "--ppid", fmt.Sprint(os.Getpid()))
+	output, err := cmd.Output()
+	if err != nil {
+		log.Printf("Failed to list child processes: %v", err)
+		return
+	}
+	
+	// Kill each child process
+	for _, pidStr := range strings.Fields(string(output)) {
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			log.Printf("Invalid PID %s: %v", pidStr, err)
+			continue
+		}
+		
+		// Try to kill the process
+		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+			log.Printf("Failed to kill process %d: %v", pid, err)
+		}
+	}
+}
+
 func main() {
+	// Ensure we clean up child processes on exit
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from panic: %v", r)
+		}
+		cleanupChildProcesses()
+	}()
+
 	// Create a context that will be canceled on interrupt
 	ctx, cancelFunc = context.WithCancel(context.Background())
-	defer cancelFunc()
+	defer func() {
+		cancelFunc()
+		cleanupChildProcesses()
+	}()
 
 	// Create a new Discord session using the token from .env
 	token := os.Getenv("DISCORD_TOKEN")
@@ -152,45 +206,74 @@ func main() {
 	// Start a goroutine to handle shutdown
 	go func() {
 		// Wait for a signal or context cancellation
+		var sig os.Signal
 		select {
-		case sig := <-signalChan:
+		case sig = <-signalChan:
 			log.Printf("Received signal: %v. Shutting down gracefully...\n", sig)
 		case <-ctx.Done():
+			sig = syscall.SIGTERM
 			log.Println("Shutting down due to context cancellation...")
 		}
 
-		// Clean up voice connections
-		log.Println("Disconnecting from voice channels...")
-		for guildID, instance := range voiceManager.Instances {
-			if instance != nil && instance.Connection != nil {
-				log.Printf("Leaving voice channel in guild %s", guildID)
-				if err := instance.Leave(); err != nil {
-					log.Printf("Error leaving voice channel in guild %s: %v", guildID, err)
+		// Create a new context with timeout for graceful shutdown
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Channel to track completion of cleanup
+		cleanupDone := make(chan struct{})
+
+		// Perform cleanup in a separate goroutine
+		go func() {
+			// Clean up voice connections
+			log.Println("Disconnecting from voice channels...")
+			for guildID, instance := range voiceManager.Instances {
+				if instance != nil && instance.Connection != nil {
+					log.Printf("Leaving voice channel in guild %s", guildID)
+					if err := instance.Leave(); err != nil {
+						log.Printf("Error leaving voice channel in guild %s: %v", guildID, err)
+					}
 				}
 			}
-		}
 
-		// Delete all registered commands
-		log.Println("Removing application commands...")
-		for i, cmd := range registeredCommands {
-			if cmd != nil {
-				log.Printf("Deleting command: %s", cmd.Name)
-				if err := discord.ApplicationCommandDelete(discord.State.User.ID, "", cmd.ID); err != nil {
-					log.Printf("Cannot delete '%v' command: %v", cmd.Name, err)
-				} else {
-					registeredCommands[i] = nil // Mark as deleted
+			// Delete all registered commands
+			log.Println("Removing application commands...")
+			for i, cmd := range registeredCommands {
+				if cmd != nil {
+					log.Printf("Deleting command: %s", cmd.Name)
+					if err := discord.ApplicationCommandDelete(discord.State.User.ID, "", cmd.ID); err != nil {
+						log.Printf("Cannot delete '%v' command: %v", cmd.Name, err)
+					} else {
+						registeredCommands[i] = nil // Mark as deleted
+					}
 				}
 			}
+
+			// Close the Discord session
+			log.Println("Closing Discord session...")
+			if err := discord.Close(); err != nil {
+				log.Printf("Error closing Discord session: %v", err)
+			}
+
+			close(cleanupDone)
+		}()
+
+		// Wait for cleanup to complete or timeout
+		select {
+		case <-cleanupDone:
+			log.Println("Cleanup completed successfully")
+		case <-shutdownCtx.Done():
+			log.Printf("Cleanup timed out: %v", shutdownCtx.Err())
 		}
 
-		// Close the Discord session
-		log.Println("Closing Discord session...")
-		if err := discord.Close(); err != nil {
-			log.Printf("Error closing Discord session: %v", err)
+		// Force exit if we received a second signal
+		if sig == syscall.SIGINT || sig == syscall.SIGTERM {
+			log.Println("Forcefully terminating...")
+			// Use os.Exit(0) to ensure immediate termination
+			os.Exit(0)
+		} else {
+			// For other signals, let the program exit normally
+			log.Println("Shutdown complete")
 		}
-
-		// Exit the application
-		os.Exit(0)
 	}()
 
 	log.Println("Bot is now running. Press Ctrl+C to exit.")
