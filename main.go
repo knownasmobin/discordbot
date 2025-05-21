@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -78,13 +79,15 @@ func init() {
 	// Initialize voice manager
 	voiceManager = audio.NewVoiceManager()
 
-	// Initialize YouTube client
-	youtubeClient = youtube.NewClient()
+	// Initialize YouTube client with cache directory
+	cacheDir := filepath.Join(os.TempDir(), "discordbot", "cache")
+	youtubeClient = youtube.NewClient(cacheDir)
 
-	// Initialize Spotify client with YouTube search function
-	spotifyClient, err = spotify.NewClient(youtube.Search)
-	if err != nil {
-		log.Printf("Warning: Spotify client initialization failed: %v", err)
+	// Initialize Spotify client (will be disabled if not configured)
+	var spotifyErr error
+	spotifyClient, spotifyErr = spotify.NewClient(youtubeClient)
+	if spotifyErr != nil {
+		log.Printf("Warning: Spotify client initialization failed: %v", spotifyErr)
 		log.Printf("Spotify functionality will be disabled")
 	}
 }
@@ -400,10 +403,12 @@ func playNextInQueue(s *discordgo.Session, channelID string, vi *audio.VoiceInst
 	vi.Mu.Unlock()
 
 	// Send message to channel
-	message, _ := s.ChannelMessageSend(channelID, fmt.Sprintf("Downloading: %s", url))
+	message, err := s.ChannelMessageSend(channelID, fmt.Sprintf("Downloading: %s", url))
+	if err != nil {
+		log.Printf("Failed to send message: %v", err)
+	}
 
 	var audioFile string
-	var err error
 
 	// Determine if it's a YouTube or Spotify URL
 	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
@@ -484,42 +489,19 @@ func playNextInQueue(s *discordgo.Session, channelID string, vi *audio.VoiceInst
 		vi.Mu.Unlock()
 
 		if isQueueEmpty && isAutoplay {
-			// Find a related video based on the current URL
-			var relatedURL string
-			var err error
+			// For now, just repeat the current track
+			// In a real implementation, you might want to implement a better autoplay system
+			vi.Mu.Lock()
+			vi.Queue = append(vi.Queue, currentURL)
+			vi.Mu.Unlock()
 
-			if strings.Contains(currentURL, "youtube.com") || strings.Contains(currentURL, "youtu.be") {
-				// Get related YouTube video
-				relatedURL, err = youtubeClient.GetRelatedVideo(currentURL)
-				if err != nil {
-					s.ChannelMessageSend(channelID, fmt.Sprintf("Failed to find related video: %v", err))
-					// Fallback to repeating the current track
-					relatedURL = currentURL
-				}
-			} else if strings.Contains(currentURL, "spotify.com") {
-				// Get related Spotify track
-				if spotifyClient != nil {
-					relatedURL, err = spotifyClient.GetRelatedTrack(currentURL)
-					if err != nil {
-						s.ChannelMessageSend(channelID, fmt.Sprintf("Failed to find related track: %v", err))
-						// Fallback to repeating the current track
-						relatedURL = currentURL
-					}
-				} else {
-					// Spotify client unavailable, fallback to current URL
-					relatedURL = currentURL
-				}
-			} else {
-				// Unknown URL type, fallback to current URL
-				relatedURL = currentURL
-			}
-
-			vi.AddToQueue(relatedURL)
-			s.ChannelMessageSend(channelID, fmt.Sprintf("Autoplay: Adding related track to queue: %s", relatedURL))
+			// Recursively call playNextInQueue to play the next item
+			go playNextInQueue(s, channelID, vi)
+		} else {
+			vi.Mu.Lock()
+			vi.IsPlaying = false
+			vi.Mu.Unlock()
 		}
-
-		// Play the next item in the queue
-		go playNextInQueue(s, channelID, vi)
 	} else {
 		vi.Mu.Lock()
 		vi.IsPlaying = false

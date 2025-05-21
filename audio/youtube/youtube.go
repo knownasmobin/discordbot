@@ -1,16 +1,13 @@
 package youtube
 
 import (
-	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -30,6 +27,14 @@ func NewClient(cacheDir string) *Client {
 	return &Client{
 		CacheDir: cacheDir,
 	}
+}
+
+// VideoInfo represents basic video information
+type VideoInfo struct {
+	ID      string
+	Title   string
+	Author  string
+	Webpage string
 }
 
 // GetVideoID extracts the video ID from a YouTube URL
@@ -60,12 +65,14 @@ func (c *Client) GetVideoID(url string) (string, error) {
 	// Handle youtube.com/shorts/ format
 	if strings.Contains(url, "youtube.com/shorts/") {
 		parts := strings.Split(url, "shorts/")
-		if len(parts) >= 2 {
-			return strings.Split(parts[1], "?")[0], nil
+		if len(parts) < 2 {
+			return "", fmt.Errorf("invalid YouTube Shorts URL")
 		}
+		return strings.Split(parts[1], "?")[0], nil
 	}
 
-	return "", fmt.Errorf("could not extract video ID from URL")
+	// If we get here, the URL format is not recognized
+	return "", fmt.Errorf("unrecognized YouTube URL format")
 }
 
 // DownloadAudio downloads audio from YouTube using yt-dlp
@@ -85,15 +92,13 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 	// Create command to download audio using yt-dlp
 	cmd := exec.Command("yt-dlp",
 		"-x",                      // Extract audio
-		"--audio-format", "best",  // Best audio quality
+		"--audio-format", "mp3",   // Convert to MP3
 		"-o", outputPath,          // Output path
 		"--no-playlist",           // Don't download playlists
 		"--no-warnings",           // Suppress warnings
 		"--quiet",                 // Quiet mode
 		"--no-cache-dir",          // Don't use cache
 		"--no-check-certificate",   // Skip SSL certificate verification
-		"--format", "bestaudio",   // Ensure we get the best audio quality
-		"--extract-audio",         // Extract audio
 		"--audio-quality", "0",    // Best audio quality
 		"--default-search", "auto", // Auto-detect URL type
 		"--prefer-ffmpeg",         // Prefer ffmpeg for post-processing
@@ -101,132 +106,86 @@ func (c *Client) DownloadAudio(videoID string) (string, error) {
 		"https://youtube.com/watch?v="+videoID,
 	)
 
-	// Set up error handling
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
 
-	// Run the command
-	log.Printf("Downloading audio for video ID: %s", videoID)
-	err = cmd.Run()
+	// Run the command and capture combined output (stdout + stderr)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("error downloading audio: %v, stderr: %s", err, stderr.String())
+		return "", fmt.Errorf("yt-dlp failed: %v\nOutput: %s", err, string(output))
 	}
 
-	// Find the downloaded file
-	matches, err := filepath.Glob(filepath.Join(c.CacheDir, videoID+".*"))
-	if err != nil {
-		return "", fmt.Errorf("error searching for downloaded file: %v", err)
-	}
-	if len(matches) == 0 {
-		return "", fmt.Errorf("no matching audio files found in %s", c.CacheDir)
+	// The actual output file will have the .mp3 extension
+	actualFile := filepath.Join(c.CacheDir, fmt.Sprintf("%s.mp3", videoID))
+	if _, err := os.Stat(actualFile); os.IsNotExist(err) {
+		return "", fmt.Errorf("output file not found: %s", actualFile)
 	}
 
-	// Return the first matching file with absolute path
-	audioPath, err := filepath.Abs(matches[0])
-	if err != nil {
-		return "", fmt.Errorf("error getting absolute path: %v", err)
-	}
-
-	log.Printf("Successfully downloaded audio to: %s", audioPath)
-	return audioPath, nil
+	return actualFile, nil
 }
 
 // Play plays YouTube audio in a Discord voice channel
 func (c *Client) Play(vc *discordgo.VoiceConnection, url string) error {
-	// First, get the video ID from the URL
+	// Extract video ID from URL
 	videoID, err := c.GetVideoID(url)
 	if err != nil {
 		return fmt.Errorf("invalid YouTube URL: %v", err)
 	}
 
 	// Download the audio
-	audioPath, err := c.DownloadAudio(videoID)
+	audioFile, err := c.DownloadAudio(videoID)
 	if err != nil {
-		return fmt.Errorf("error downloading audio: %v", err)
+		return fmt.Errorf("failed to download audio: %v", err)
+	}
+	defer os.Remove(audioFile) // Clean up the file after playing
+
+	// Create a new FFmpeg audio source
+	ffmpegCmd := exec.Command("ffmpeg",
+		"-i", audioFile,
+		"-f", "s16le",
+		"-ar", "48000",
+		"-ac", "2",
+		"-loglevel", "warning",
+		"-hide_banner",
+		"-nostats",
+		"pipe:1",
+	)
+
+	// Get the audio stream
+	audioStream, err := ffmpegCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %v", err)
 	}
 
-	// Make sure to clean up the temporary file
-	defer func() {
-		if audioPath != "" {
-			if err := os.Remove(audioPath); err != nil {
-				log.Printf("Error removing temporary file %s: %v", audioPath, err)
-			}
+	// Start FFmpeg
+	err = ffmpegCmd.Start()
+	if err != nil {
+		return fmt.Errorf("failed to start FFmpeg: %v", err)
+	}
+	defer ffmpegCmd.Process.Kill()
+
+	// Create a buffer for the audio data
+	buffer := make([][]byte, 0)
+	tempBuf := make([]byte, 1024)
+
+	// Read the audio data into the buffer
+	for {
+		n, err := audioStream.Read(tempBuf)
+		if err == io.EOF {
+			break
 		}
-	}()
+		if err != nil {
+			return fmt.Errorf("error reading audio stream: %v", err)
+		}
 
-	// Set speaking state
-	err = vc.Speaking(true)
-	if err != nil {
-		return fmt.Errorf("error setting speaking state: %v", err)
+		buffer = append(buffer, tempBuf[:n])
 	}
+
+	// Send the audio data to Discord
+	vc.Speaking(true)
 	defer vc.Speaking(false)
 
-	// Create a command to convert the audio to raw PCM and send to stdout
-	cmd := exec.Command("ffmpeg",
-		"-i", audioPath,           // Input file
-		"-f", "s16le",              // Output format (signed 16-bit little-endian)
-		"-ar", "48000",             // Audio sample rate (48kHz)
-		"-ac", "2",                 // Audio channels (stereo)
-		"-loglevel", "warning",      // Only show warnings and errors
-		"-bufsize", "96K",           // Buffer size for better streaming
-		"-threads", "0",             // Use all available CPU threads
-		"pipe:1")                   // Output to stdout
-
-	// Get the command's stdout pipe
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("error creating stdout pipe: %v", err)
-	}
-
-	// Capture stderr for debugging
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	// Start the command
-	log.Printf("Starting ffmpeg for audio playback: %s", audioPath)
-	err = cmd.Start()
-	if err != nil {
-		return fmt.Errorf("error starting ffmpeg: %v, stderr: %s", err, stderr.String())
-	}
-
-	// Make sure to clean up the ffmpeg process
-	defer func() {
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-	}()
-
-	// Buffer for reading audio data (20ms of stereo audio at 48kHz = 3840 bytes)
-	buffer := make([]byte, 3840)
-
-	// Read and send audio data
-	for {
-		// Read raw PCM data
-		n, err := io.ReadFull(stdout, buffer)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		} else if err != nil {
-			log.Printf("Error reading audio data: %v, stderr: %s", err, stderr.String())
-			break
-		}
-
-		// Send the raw PCM data to Discord
-		// Discord will handle the Opus encoding internally
-		select {
-		case vc.OpusSend <- buffer[:n]:
-			// Data sent successfully
-		default:
-			// Channel full, skip this chunk to prevent blocking
-			log.Println("Warning: OpusSend channel full, dropping audio data")
-		}
-
-		// Small delay to prevent overwhelming the connection
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	// Wait for ffmpeg to finish
-	if err := cmd.Wait(); err != nil {
-		log.Printf("ffmpeg finished with error: %v, stderr: %s", err, stderr.String())
+	// Send the audio data in chunks
+	for _, chunk := range buffer {
+		vc.OpusSend <- chunk
 	}
 
 	return nil

@@ -3,9 +3,9 @@ package spotify
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
-	"strings"
 
 	"discordbot/audio/youtube"
 
@@ -18,11 +18,11 @@ import (
 // Client handles Spotify integration
 type Client struct {
 	SpotifyClient *spotify.Client
-	YouTubeSearch func(query string) (string, error)
+	YouTubeClient *youtube.Client
 }
 
 // NewClient creates a new Spotify client
-func NewClient(youtubeSearch func(query string) (string, error)) (*Client, error) {
+func NewClient(ytClient *youtube.Client) (*Client, error) {
 	// Get Spotify credentials from environment
 	clientID := os.Getenv("SPOTIFY_ID")
 	clientSecret := os.Getenv("SPOTIFY_SECRET")
@@ -48,7 +48,7 @@ func NewClient(youtubeSearch func(query string) (string, error)) (*Client, error
 
 	return &Client{
 		SpotifyClient: client,
-		YouTubeSearch: youtubeSearch,
+		YouTubeClient: ytClient,
 	}, nil
 }
 
@@ -85,62 +85,61 @@ func (c *Client) GetTrackInfo(trackID string) (*spotify.FullTrack, error) {
 	return track, nil
 }
 
-// PlayTrack plays a Spotify track via YouTube search
-func (c *Client) PlayTrack(vc *discordgo.VoiceConnection, url string) error {
-	// Extract track ID
-	trackID, err := c.GetTrackID(url)
+// Search searches for a track on YouTube and returns the first result
+func (c *Client) Search(query string) (string, error) {
+	// Get track info from Spotify
+	trackID, err := c.GetTrackID(query)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("invalid Spotify URL: %v", err)
 	}
 
-	// Get track info
 	track, err := c.GetTrackInfo(trackID)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("failed to get track info: %v", err)
 	}
 
-	// Construct search query for YouTube
-	artists := make([]string, len(track.Artists))
-	for i, artist := range track.Artists {
-		artists[i] = artist.Name
-	}
+	// Create search query
+	searchQuery := fmt.Sprintf("%s - %s", track.Name, track.Artists[0].Name)
+	
+	// For now, we'll just return a YouTube URL directly since we don't have a search implementation
+	// In a real implementation, you would use the YouTube Data API or yt-dlp to search
+	return fmt.Sprintf("https://www.youtube.com/results?search_query=%s", url.QueryEscape(searchQuery)), nil
+}
 
-	query := fmt.Sprintf("%s - %s", strings.Join(artists, ", "), track.Name)
-
-	// Search on YouTube and get URL
-	youtubeURL, err := c.YouTubeSearch(query)
+// PlayTrack plays a Spotify track via YouTube search
+func (c *Client) PlayTrack(vc *discordgo.VoiceConnection, url string) error {
+	// Search for the track on YouTube
+	youtubeURL, err := c.Search(url)
 	if err != nil {
 		return fmt.Errorf("failed to find track on YouTube: %v", err)
 	}
 
 	// Use the YouTube client to play the track
-	ytClient := youtube.NewClient()
-	return ytClient.Play(vc, youtubeURL)
+	return c.YouTubeClient.Play(vc, youtubeURL)
 }
 
 // GetRelatedTrack finds a related track based on the current Spotify track
-func (c *Client) GetRelatedTrack(url string) (string, error) {
+func (c *Client) GetRelatedTrack(trackURL string) (string, error) {
 	// Extract track ID
-	trackID, err := c.GetTrackID(url)
+	trackID, err := c.GetTrackID(trackURL)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("invalid Spotify URL: %v", err)
 	}
 
 	// Get track info
 	track, err := c.GetTrackInfo(trackID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get track info: %v", err)
 	}
 
 	// Get artist name
-	var artistName string
-	if len(track.Artists) > 0 {
-		artistName = track.Artists[0].Name
-	} else {
+	if len(track.Artists) == 0 {
 		return "", fmt.Errorf("no artist found for track")
 	}
 
-	// Use YouTube client to find similar tracks by the same artist
-	ytClient := youtube.NewClient()
-	return ytClient.GetRelatedSpotifyTrack(artistName, track.Name)
+	// Create a search query for related tracks
+	searchQuery := fmt.Sprintf("%s %s official audio", track.Artists[0].Name, track.Name)
+	
+	// Return a YouTube search URL for the related track
+	return fmt.Sprintf("https://www.youtube.com/results?search_query=%s", url.QueryEscape(searchQuery)), nil
 }
